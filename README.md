@@ -3,7 +3,7 @@
 Rank headphone frequency response measurements by how closely they match a target curve (e.g., Harman over-ear 2018).
 Closeness is calculated using **root-mean-square error (RMSE)** between the interpolated measurement and the target response.
 
-The script supports **A-weighting, C-weighting, or flat weighting**, and includes **interactive plotting** for visual comparison.
+The script supports **A-weighting, C-weighting, or flat weighting**, and includes **interactive web browser plotting** for visual comparison.
 
 ---
 
