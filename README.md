@@ -65,7 +65,7 @@ python response_rank.py <measurements_dir> <target_csv> [options]
 python response_rank.py \
   ~/git/AutoEq/measurements/oratory1990/data/over-ear \
   "~/git/AutoEq/targets/oratory1990 optimum hifi over-ear.csv" \
-  --top 2 --ranking 7,13,14,16
+  --aweight --top 2 --ranking 7,13,14,16
 ```
 
 ---
