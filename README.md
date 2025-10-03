@@ -91,6 +91,9 @@ Ranked headphones (closest first):
  15. Dan Clark Audio Ether C.csv                        RMSE=1.4016
  16. Audio-Technica ATH-M50x.csv                        RMSE=1.4166
 ```
+<p align="center">
+  <img src="https://i.imgur.com/ZUtvei2.png" alt="ResponseRank interactive plot" width="1216">
+</p>
 
 ---
 
