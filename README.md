@@ -1,2 +1,123 @@
 # ResponseRank
-Rank headphone measurements by closeness to a target
+
+Rank headphone frequency response measurements by how closely they match a target curve (e.g., Harman over-ear 2018).
+Closeness is calculated using **root-mean-square error (RMSE)** between the interpolated measurement and the target response.
+
+The script supports **A-weighting, C-weighting, or flat weighting**, and includes **interactive plotting** for visual comparison.
+
+---
+
+## Features
+
+* Compares all `.csv` measurement files in a folder against a target curve.
+* Interpolates measurements to the target frequencies for fair comparison.
+* Calculates RMSE and ranks results from closest to furthest.
+* Prints a clean, sorted list of rankings in the terminal.
+* Optional weighting:
+
+  * **A-weighting** (default for perceptual relevance)
+  * **C-weighting** (for loud/high-level listening)
+  * **Flat** (no weighting)
+* Interactive Plotly plots:
+
+  * Toggle traces on/off
+  * Zoom, pan, and hover for detailed frequency response
+  * Combine `--top` and `--ranking` selections in one plot
+
+---
+
+## Requirements
+
+* Python 3.7+
+* [pandas](https://pandas.pydata.org/)
+* [numpy](https://numpy.org/)
+* [plotly](https://plotly.com/python/) (for interactive plotting)
+
+Install dependencies:
+
+```bash
+pip install pandas numpy plotly
+```
+
+---
+
+## Usage
+
+```bash
+python response_rank.py <measurements_dir> <target_csv> [options]
+```
+
+### Options
+
+| Option                                           | Description                                                   |
+| ------------------------------------------------ | ------------------------------------------------------------- |
+| `--aweight`                                      | Use A-weighting for RMSE (default if unspecified is **flat**) |
+| `--cweight`                                      | Use C-weighting for RMSE                                      |
+| `--top N`                                        | Plot the top N ranked headphones                              |
+| `--ranking R1,R2,...`                            | Plot specific ranked items by their rank number               |
+| `--top` and `--ranking` can be used **together** |                                                               |
+
+---
+
+### Example
+
+```bash
+python response_rank.py \
+  ~/git/AutoEq/measurements/oratory1990/data/over-ear \
+  "~/git/AutoEq/targets/oratory1990 optimum hifi over-ear.csv" \
+  --top 2 --ranking 7,13,14,16
+```
+
+---
+
+### Sample Output
+
+```bash
+Ranked headphones (closest first):
+  1. Sennheiser HD 600.csv                              RMSE=1.0608
+  2. Beyerdynamic DT 880 (worn earpads).csv             RMSE=1.1521
+  3. Dan Clark Audio EXPANSE.csv                        RMSE=1.2031
+  4. Philips Fidelio X2HR.csv                           RMSE=1.2360
+  5. Sennheiser HE 90 Orpheus.csv                       RMSE=1.2371
+  6. FiiO FT3 (pleather earpads).csv                    RMSE=1.2595
+  7. Audio-Technica ATH-R70x.csv                        RMSE=1.2852
+  8. FiiO FT3 (suede earpads).csv                       RMSE=1.3241
+  9. Onkyo A800.csv                                     RMSE=1.3275
+ 10. Sennheiser HE 1 Orpheus 2.csv                      RMSE=1.3308
+ 11. Shure SRH440.csv                                   RMSE=1.3574
+ 12. Dan Clark Audio Stealth.csv                        RMSE=1.3676
+ 13. Sennheiser HD 6XX.csv                              RMSE=1.3881
+ 14. Sennheiser HD 650.csv                              RMSE=1.3881
+ 15. Dan Clark Audio Ether C.csv                        RMSE=1.4016
+ 16. Audio-Technica ATH-M50x.csv                        RMSE=1.4166
+```
+
+---
+
+## Notes
+
+* Measurement and target files must be `.csv` with:
+
+  * **Column 1:** Frequency (Hz)
+  * **Column 2:** Response (dB)
+* Non-CSV files are ignored automatically.
+* Frequencies in measurement and target files **do not need to match** — the script interpolates them.
+* Interactive plotting is optional and only generated when `--top` or `--ranking` is used.
+
+---
+
+## Why This Script?
+
+### RMSE
+
+Root-mean-square error summarizes the overall difference between a measurement and the target curve in a **single number**, penalizing large deviations more heavily than smaller ones. It’s ideal for ranking headphones by tonal accuracy.
+
+### Interpolation
+
+Measurements often have different frequency points than the target. Interpolation ensures a **fair, consistent comparison** across all files.
+
+### Use Cases
+
+* Quickly rank multiple headphone measurements.
+* Compare against any reference target (e.g., Harman 2018, oratory1990 optimum hifi).
+* Useful for **reviewers, audio engineers, and enthusiasts** who want automated ranking and visualization.
