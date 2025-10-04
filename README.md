@@ -36,7 +36,7 @@ The script supports **A-weighting, C-weighting, or flat weighting**, and include
 Install dependencies:
 
 ```bash
-pip install pandas numpy plotly
+pip install pandas numpy scipy scikit-learn plotly
 ```
 
 ---
