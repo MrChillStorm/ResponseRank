@@ -1,9 +1,16 @@
 # ResponseRank
 
-Rank headphone frequency response measurements by how closely they match a target curve (e.g., Harman over-ear 2018).
+Rank headphone frequency response measurements by how closely they match a target curve (e.g., Harman over-ear 2018).  
 Closeness is calculated using **root-mean-square error (RMSE)** between the interpolated measurement and the target response.
 
-The script supports **A-weighting, C-weighting, or flat weighting**, and includes **interactive web browser plotting** for visual comparison.
+The script also computes a **preference score** based on the AES 2018 model for headphone preference:
+
+> Olive, S., Welti, T., & McMullin, E. (2018).  
+> *A Statistical Model that Predicts Listeners’ Preference Ratings of Around-Ear and On-Ear Headphones*.  
+> AES Convention: 144, Paper Number: 9919, Publication Date: 2018-05-06.  
+> [AES e-Library link](https://aes2.org/publications/elibrary-page/?id=19436)
+
+This model estimates listener preference from headphone frequency response using smoothness and slope metrics.
 
 ---
 
@@ -11,11 +18,12 @@ The script supports **A-weighting, C-weighting, or flat weighting**, and include
 
 * Compares all `.csv` measurement files in a folder against a target curve.
 * Interpolates measurements to the target frequencies for fair comparison.
-* Calculates RMSE and ranks results from closest to furthest.
+* Calculates **RMSE** and **Preference Score** for each headphone.
+* Ranks results from closest to furthest.
 * Prints a clean, sorted list of rankings in the terminal.
 * Optional weighting:
 
-  * **A-weighting** (default for perceptual relevance)
+  * **A-weighting** (perceptually relevant at moderate levels)
   * **C-weighting** (for loud/high-level listening)
   * **Flat** (no weighting)
 * Interactive Plotly plots:
@@ -31,13 +39,15 @@ The script supports **A-weighting, C-weighting, or flat weighting**, and include
 * Python 3.7+
 * [pandas](https://pandas.pydata.org/)
 * [numpy](https://numpy.org/)
+* [scipy](https://scipy.org/) (for Savitzky-Golay smoothing)
+* [scikit-learn](https://scikit-learn.org/) (for regression slope analysis)
 * [plotly](https://plotly.com/python/) (for interactive plotting)
 
 Install dependencies:
 
 ```bash
 pip install pandas numpy scipy scikit-learn plotly
-```
+````
 
 ---
 
@@ -90,6 +100,7 @@ Ranked headphones (closest first):
  14. Sennheiser HD 650.csv                              RMSE=1.3870  Pref≈90.62
 ...
 ```
+
 <p align="center">
   <img src="https://i.imgur.com/hZxigjn.png" alt="ResponseRank interactive plot" width="1222">
 </p>
@@ -113,6 +124,10 @@ Ranked headphones (closest first):
 ### RMSE
 
 Root-mean-square error summarizes the overall difference between a measurement and the target curve in a **single number**, penalizing large deviations more heavily than smaller ones. It’s ideal for ranking headphones by tonal accuracy.
+
+### Preference Score
+
+Based on AES 2018 research, the preference score uses frequency response smoothness and slope deviation to estimate how much listeners are likely to prefer the sound of a headphone.
 
 ### Interpolation
 
