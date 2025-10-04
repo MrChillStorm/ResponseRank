@@ -39,14 +39,13 @@ This model estimates listener preference from headphone frequency response using
 * Python 3.7+
 * [pandas](https://pandas.pydata.org/)
 * [numpy](https://numpy.org/)
-* [scipy](https://scipy.org/) (for Savitzky-Golay smoothing)
 * [scikit-learn](https://scikit-learn.org/) (for regression slope analysis)
 * [plotly](https://plotly.com/python/) (for interactive plotting)
 
 Install dependencies:
 
 ```bash
-pip install pandas numpy scipy scikit-learn plotly
+pip install pandas numpy plotly scikit-learn
 ````
 
 ---
@@ -84,25 +83,25 @@ python response_rank.py \
 
 ```bash
 Ranked headphones (closest first):
-  1. Sennheiser HD 600.csv                              RMSE=1.0602  Pref≈91.08
-  2. Beyerdynamic DT 880 (worn earpads).csv             RMSE=1.1515  Pref≈78.71
-  3. Dan Clark Audio EXPANSE.csv                        RMSE=1.2031  Pref≈57.53
-  4. Philips Fidelio X2HR.csv                           RMSE=1.2364  Pref≈84.69
-  5. Sennheiser HE 90 Orpheus.csv                       RMSE=1.2368  Pref≈92.96
-  6. FiiO FT3 (pleather earpads).csv                    RMSE=1.2597  Pref≈80.56
-  7. Audio-Technica ATH-R70x.csv                        RMSE=1.2842  Pref≈85.97
-  8. FiiO FT3 (suede earpads).csv                       RMSE=1.3243  Pref≈66.41
-  9. Onkyo A800.csv                                     RMSE=1.3265  Pref≈83.02
- 10. Sennheiser HE 1 Orpheus 2.csv                      RMSE=1.3307  Pref≈85.15
- 11. Shure SRH440.csv                                   RMSE=1.3587  Pref≈87.22
- 12. Dan Clark Audio Stealth.csv                        RMSE=1.3663  Pref≈57.26
- 13. Sennheiser HD 6XX.csv                              RMSE=1.3870  Pref≈90.62
- 14. Sennheiser HD 650.csv                              RMSE=1.3870  Pref≈90.62
+  1. Sennheiser HD 600.csv                              RMSE=1.0602  Pref≈87.57
+  2. Beyerdynamic DT 880 (worn earpads).csv             RMSE=1.1515  Pref≈62.77
+  3. Dan Clark Audio EXPANSE.csv                        RMSE=1.2031  Pref≈32.70
+  4. Philips Fidelio X2HR.csv                           RMSE=1.2364  Pref≈79.03
+  5. Sennheiser HE 90 Orpheus.csv                       RMSE=1.2368  Pref≈85.99
+  6. FiiO FT3 (pleather earpads).csv                    RMSE=1.2597  Pref≈66.24
+  7. Audio-Technica ATH-R70x.csv                        RMSE=1.2842  Pref≈81.32
+  8. FiiO FT3 (suede earpads).csv                       RMSE=1.3243  Pref≈46.06
+  9. Onkyo A800.csv                                     RMSE=1.3265  Pref≈75.24
+ 10. Sennheiser HE 1 Orpheus 2.csv                      RMSE=1.3307  Pref≈75.99
+ 11. Shure SRH440.csv                                   RMSE=1.3587  Pref≈81.41
+ 12. Dan Clark Audio Stealth.csv                        RMSE=1.3663  Pref≈33.25
+ 13. Sennheiser HD 6XX.csv                              RMSE=1.3870  Pref≈91.69
+ 14. Sennheiser HD 650.csv                              RMSE=1.3870  Pref≈91.69
 ...
 ```
 
 <p align="center">
-  <img src="https://i.imgur.com/hZxigjn.png" alt="ResponseRank interactive plot" width="1222">
+  <img src="https://i.imgur.com/VhffhYQ.png" alt="ResponseRank interactive plot" width="1219">
 </p>
 
 ---
