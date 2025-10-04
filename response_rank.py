@@ -8,6 +8,8 @@ import argparse
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+from scipy.signal import savgol_filter
+from sklearn.linear_model import LinearRegression
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -67,10 +69,51 @@ def c_weight(freq):
     Rc1k = (c**2) * f1k2 / ((f1k2 + 20.6**2) * (f1k2 + c**2))
     return Rc / Rc1k
 
+def smooth_response(freq, resp, window=51):
+    """Apply 1/3-octave smoothing using Savitzky-Golay filter."""
+    if len(resp) < window:
+        window = len(resp) // 2 * 2 + 1
+    return savgol_filter(resp, window, 3)
+
+def normalize_at_1kHz(freq, resp):
+    """Normalize response to 0 dB at 1 kHz by interpolating and subtracting the value at 1 kHz."""
+    interp_func = np.interp(1000, freq, resp)
+    return resp - interp_func
+
 def compute_rmse(meas_freq, meas_resp, target_freq, target_resp, weights):
+    """Compute RMSE on raw, normalized data."""
     interp_resp = np.interp(target_freq, meas_freq, meas_resp)
+    interp_resp = normalize_at_1kHz(target_freq, interp_resp)
+    target_resp = normalize_at_1kHz(target_freq, target_resp)
     rmse = np.sqrt(np.mean(weights * (interp_resp - target_resp)**2))
-    return rmse, interp_resp
+    return rmse
+
+def compute_pref_metrics(meas_freq, meas_resp, target_freq, target_resp):
+    """Compute preference score on smoothed, normalized data."""
+    interp_resp = np.interp(target_freq, meas_freq, meas_resp)
+    interp_resp = smooth_response(target_freq, interp_resp)
+    interp_resp = normalize_at_1kHz(target_freq, interp_resp)
+    target_resp = smooth_response(target_freq, target_resp)
+    target_resp = normalize_at_1kHz(target_freq, target_resp)
+    error = interp_resp - target_resp
+
+    # Mask for 20 Hz to 10 kHz
+    mask_20_10k = (target_freq >= 20) & (target_freq <= 10000)
+    error_20_10k = error[mask_20_10k]
+    freq_20_10k = target_freq[mask_20_10k]
+
+    # Standard Deviation (SD) over 20 Hz to 10 kHz
+    sd = np.std(error_20_10k)
+
+    # Absolute Slope (AS) over 20 Hz to 10 kHz
+    x = np.log(freq_20_10k).reshape(-1, 1)
+    y = error_20_10k
+    model = LinearRegression().fit(x, y)
+    as_value = np.abs(model.coef_[0])
+
+    # Preference Score (based on 2018 AES paper)
+    pref = 114.49 - (12.62 * sd) - (15.52 * as_value)
+    return pref
 
 def main():
     args = parse_args()
@@ -81,7 +124,7 @@ def main():
     top_n = args.top
     ranking = args.ranking
 
-    # Load target curve
+    # Load raw target curve
     target = pd.read_csv(target_path)
     target_freq = target.iloc[:, 0].values
     target_resp = target.iloc[:, 1].values
@@ -107,8 +150,9 @@ def main():
             meas = pd.read_csv(fpath)
             meas_freq = meas.iloc[:, 0].values
             meas_resp = meas.iloc[:, 1].values
-            rmse, interp_resp = compute_rmse(meas_freq, meas_resp, target_freq, target_resp, weights)
-            results.append((fname, rmse, interp_resp))
+            rmse = compute_rmse(meas_freq, meas_resp, target_freq, target_resp, weights)
+            pref = compute_pref_metrics(meas_freq, meas_resp, target_freq, target_resp)
+            results.append((fname, rmse, pref))
         except Exception as e:
             print(f"Skipping {fname}, error: {e}")
 
@@ -116,8 +160,8 @@ def main():
     results.sort(key=lambda x: x[1])
 
     print("Ranked headphones (closest first):")
-    for i, (fname, rmse, _) in enumerate(results, start=1):
-        print(f"{i:3d}. {fname:<50} RMSE={rmse:.4f}")
+    for i, (fname, rmse, pref) in enumerate(results, start=1):
+        print(f"{i:3d}. {fname:<50} RMSE={rmse:.4f}  Pref≈{pref:.2f}")
 
     # Determine which items to plot
     to_plot = []
@@ -147,16 +191,22 @@ def main():
     # Plot interactive Plotly figure
     if to_plot:
         fig = go.Figure()
-        # Target curve
+        # Target curve (raw, normalized)
+        target_resp_norm = normalize_at_1kHz(target_freq, target_resp)
         fig.add_trace(go.Scatter(
-            x=target_freq, y=target_resp, mode='lines', name='Target Curve',
+            x=target_freq, y=target_resp_norm, mode='lines', name='Target Curve',
             line=dict(color='black', width=2)
         ))
 
-        # Headphones
-        for fname, rmse, interp_resp in to_plot:
+        # Headphones (raw, normalized)
+        for fname, rmse, pref in to_plot:
+            meas = pd.read_csv(os.path.join(measurements_dir, fname))
+            meas_freq = meas.iloc[:, 0].values
+            meas_resp = meas.iloc[:, 1].values
+            raw_interp = np.interp(target_freq, meas_freq, meas_resp)
+            raw_interp_norm = normalize_at_1kHz(target_freq, raw_interp)
             fig.add_trace(go.Scatter(
-                x=target_freq, y=interp_resp, mode='lines', name=f"{fname} (RMSE={rmse:.2f})"
+                x=target_freq, y=raw_interp_norm, mode='lines', name=f"{fname} (RMSE={rmse:.2f}, Pref≈{pref:.2f})"
             ))
 
         fig.update_layout(
