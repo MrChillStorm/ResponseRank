@@ -115,7 +115,7 @@ Ranked headphones (sorted by combined):
 ```
 
 <p align="center">
-  <img src="https://i.imgur.com/AHF4uIu.png" alt="ResponseRank interactive plot" width="1219">
+  <img src="https://i.imgur.com/AHF4uIu.png" alt="ResponseRank interactive plot" width="1403">
 </p>
 
 ---
