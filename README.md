@@ -34,7 +34,7 @@ This model estimates listener preference from headphone frequency response using
   * **rmse** – RMSE only
   * **pref** – Preference score only
 
-* Optional weighting:
+* Optional RMSE weighting:
 
   * **A-weighting** (perceptually relevant at moderate levels)
   * **C-weighting** (for loud/high-level listening)
