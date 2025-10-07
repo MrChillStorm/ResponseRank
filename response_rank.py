@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # ResponseRank — RMSE + Pref with Spearman correlation optimization and Plotly plotting
+# Added: --all-weightings option with automatic plotting of tonally balanced top headphones
 
 import os
 import argparse
@@ -23,7 +24,7 @@ def parse_args():
     group.add_argument("--bweight", action="store_true", help="Use B-weighting for RMSE (medium levels).")
     group.add_argument("--cweight", action="store_true", help="Use C-weighting for RMSE.")
     parser.add_argument("--all-weightings", action="store_true", help="Run all weightings (Flat, A, B, C) and show tonally balanced top headphones.")
-    parser.add_argument("--top", type=int, help="Plot top N headphones.")
+    parser.add_argument("--top", type=int, help="Plot / print top N headphones.")
     parser.add_argument("--ranking", type=str, help="Comma-separated rank numbers to plot (e.g. 1,3,5).")
     parser.add_argument("--sort", type=str, choices=["combined","rmse","pref"], default="combined",
                         help="Sort by this metric for table and plot. Default: combined")
@@ -48,6 +49,7 @@ def b_weight(freq):
     f = np.asarray(freq, dtype=float)
     f2 = f**2
     c = 12194.0
+    # Approximate B between A and C (informational)
     num = (c**2)*(f2**1.3)
     den = (f2+20.6**2)*(f2+c**2)*np.sqrt((f2+158.5**2)*(f2+737.9**2))
     Rb = num/den
@@ -121,15 +123,25 @@ def compute_pref_metrics(meas_freq, meas_resp, target_freq, target_resp):
 def find_optimal_weights(rmses, prefs):
     rmses = np.array(rmses)
     prefs = np.array(prefs)
-    rmses = (rmses - rmses.min()) / (rmses.max()-rmses.min())
-    prefs = (prefs - prefs.min()) / (prefs.max()-prefs.min())
+    # protect against constant arrays
+    if rmses.max() == rmses.min():
+        rmses_n = np.zeros_like(rmses)
+    else:
+        rmses_n = (rmses - rmses.min()) / (rmses.max()-rmses.min())
+    if prefs.max() == prefs.min():
+        prefs_n = np.zeros_like(prefs)
+    else:
+        prefs_n = (prefs - prefs.min()) / (prefs.max()-prefs.min())
+
     best_rho, best_w = -1, None
     for w_rmse in np.linspace(0, 1, 101):
         w_pref = 1 - w_rmse
-        combined = w_pref*prefs + (1-w_pref)*(1 - rmses)
+        combined = w_pref*prefs_n + (1-w_pref)*(1 - rmses_n)
         rho_rmse,_ = spearmanr(combined, -rmses)
         rho_pref,_ = spearmanr(combined, prefs)
         avg_rho = (rho_rmse + rho_pref)/2
+        if np.isnan(avg_rho):
+            continue
         if avg_rho > best_rho:
             best_rho, best_w = avg_rho, (1-w_pref, w_pref)
     return best_w, best_rho
@@ -146,7 +158,7 @@ def plot_headphones(measurements_dir, target_freq, target_resp, ranking, top=Non
     if ranking_nums:
         to_plot.extend([ranking[i-1] for i in ranking_nums if 0<i<=len(ranking)])
         title_parts.append(f"Ranks {','.join(map(str, ranking_nums))}")
-    # Deduplicate
+    # Deduplicate preserving order
     seen=set()
     unique=[]
     for r in to_plot:
@@ -160,13 +172,25 @@ def plot_headphones(measurements_dir, target_freq, target_resp, ranking, top=Non
         fig.add_trace(go.Scatter(x=target_freq,y=target_norm,mode='lines',
                                  name='Target Curve',line=dict(color='black',width=2)))
         for fname,rmse,pref,comb in to_plot:
-            meas=pd.read_csv(os.path.join(measurements_dir,fname))
-            meas_freq,meas_resp=meas.iloc[:,0].values,meas.iloc[:,1].values
-            meas_norm=normalize_at_1kHz(meas_freq,meas_resp)
+            meas_path = os.path.join(measurements_dir, fname)
+            # If the incoming 'fname' is already a cleaned name (no .csv) skip reading by filename
+            if os.path.exists(meas_path):
+                meas = pd.read_csv(meas_path)
+                meas_freq,meas_resp = meas.iloc[:,0].values,meas.iloc[:,1].values
+                meas_norm = normalize_at_1kHz(meas_freq,meas_resp)
+            else:
+                # If the caller passed a tuple where meas data isn't available, we skip reading and plot nothing
+                # (defensive fallback)
+                continue
+
             clean_name = os.path.splitext(fname)[0]
+            if sort_metric == "AvgNormalizedRank":
+                label = f"{clean_name} (AvgNorm={comb:.3f})"
+            else:
+                label = f"{clean_name} (RMSE={rmse:.2f}, Pref={pref:.2f}, Comb={comb:.2f})"
             fig.add_trace(go.Scatter(
                 x=meas_freq,y=meas_norm,mode='lines',
-                name=f"{clean_name} (RMSE={rmse:.2f}, Pref={pref:.2f}, Comb={comb:.2f})"
+                name=label
             ))
         fig.update_layout(
             title=f"{title_suffix} vs Target ({weight_label})",
@@ -184,11 +208,17 @@ def plot_headphones(measurements_dir, target_freq, target_resp, ranking, top=Non
 # ----------------------------------------------------------------------
 # Core ranking function
 # ----------------------------------------------------------------------
-def rank_headphones(measurements_dir, target_freq, target_resp, weight_func, weight_label, sort_metric="combined", verbose=True):
+def rank_headphones(measurements_dir, target_freq, target_resp, weight_func, weight_label, sort_metric="combined", verbose=True, top=None):
+    """
+    Rank headphones in a directory against a target response using RMSE and Pref metrics.
+
+    Returns:
+        ranking: List of tuples (filename, RMSE, Pref, CombinedScore) sorted by sort_metric.
+    """
     weights = weight_func(target_freq)
     results = []
 
-    for fname in os.listdir(measurements_dir):
+    for fname in sorted(os.listdir(measurements_dir)):
         if not fname.endswith(".csv"):
             continue
         try:
@@ -213,8 +243,8 @@ def rank_headphones(measurements_dir, target_freq, target_resp, weight_func, wei
 
     rmses = np.array(rmses)
     prefs = np.array(prefs)
-    rmses_n = (rmses - rmses.min()) / (rmses.max() - rmses.min()) if rmses.max() != rmses.min() else np.zeros_like(rmses)
-    prefs_n = (prefs - prefs.min()) / (prefs.max() - prefs.min()) if prefs.max() != prefs.min() else np.zeros_like(prefs)
+    rmses_n = (rmses - rmses.min())/(rmses.max()-rmses.min()) if rmses.max() != rmses.min() else np.zeros_like(rmses)
+    prefs_n = (prefs - prefs.min())/(prefs.max()-prefs.min()) if prefs.max() != prefs.min() else np.zeros_like(prefs)
     combined = w_pref * prefs_n + (1 - w_pref) * (1 - rmses_n)
 
     sort_idx_map = {"rmse": 1, "pref": 2, "combined": 3}
@@ -224,9 +254,11 @@ def rank_headphones(measurements_dir, target_freq, target_resp, weight_func, wei
     ranking = sorted(zip(names, rmses, prefs, combined), key=lambda x: x[sort_idx], reverse=reverse)
 
     if verbose:
+        top_to_show = min(top or len(ranking), len(ranking))
         print(f"Ranked headphones (sorted by {sort_metric}):")
-        for i, (fname, rmse, pref, comb) in enumerate(ranking, 1):
-            print(f"{i:3d}. {fname:<50} RMSE={rmse:7.3f}  Pref≈{pref:7.2f}  Combined≈{comb:9.3f}")
+        for i, (fname, rmse, pref, comb) in enumerate(ranking[:top_to_show], 1):
+            clean_name = os.path.splitext(fname)[0]
+            print(f"{i:3d}. {clean_name:<65} RMSE={rmse:6.3f}  Pref≈{pref:7.2f}  Combined≈{comb:.3f}")
 
     return ranking
 
@@ -247,6 +279,7 @@ def main():
         ]
 
         all_rankings = []
+        # Run each weighting, print rankings (top if requested), but do NOT plot individual runs
         for func, label in weightings:
             ranking = rank_headphones(
                 args.measurements_dir,
@@ -255,7 +288,8 @@ def main():
                 func,
                 label,
                 args.sort,
-                verbose=False
+                verbose=True,
+                top=args.top
             )
             all_rankings.append(ranking)
 
@@ -264,39 +298,55 @@ def main():
         top_sets = [set([r[0] for r in ranking[:top_n]]) for ranking in all_rankings]
         consistent_top = set.intersection(*top_sets)
 
-        if consistent_top:
-            avg_ranks = []
-            for fname in consistent_top:
-                ranks = []
-                for ranking in all_rankings:
-                    idx = next((i for i, r in enumerate(ranking[:top_n]) if r[0] == fname), top_n)
-                    ranks.append(1 - idx / top_n)
-                avg_ranks.append((fname, np.mean(ranks)))
+        if not consistent_top:
+            print("\nNo headphones appear in the top-{0} across all weightings.".format(top_n))
+            return
 
-            df_consistent = pd.DataFrame(avg_ranks, columns=["Headphone", "AvgNormalizedRank"])
-            df_consistent = df_consistent.sort_values(by="AvgNormalizedRank", ascending=False).reset_index(drop=True)
+        # For each consistent headphone compute average inverted normalized rank (best=1.0)
+        avg_ranks = []
+        for fname in consistent_top:
+            ranks = []
+            for ranking in all_rankings:
+                idx = next((i for i, r in enumerate(ranking[:top_n]) if r[0] == fname), top_n)
+                ranks.append(1.0 - (idx / top_n))
+            avg_ranks.append((fname, float(np.mean(ranks))))
 
-            top_to_show = min(args.top, len(df_consistent)) if args.top else len(df_consistent)
-            if args.top:
-                print(f"\nTop {top_to_show} tonally balanced headphones by average normalized rank:\n")
-            else:
-                print(f"\nAll tonally balanced headphones by average normalized rank:\n")
-            for i, row in enumerate(df_consistent.head(top_to_show).itertuples(), 1):
-                clean_name = os.path.splitext(row.Headphone)[0]
-                print(f"{i:3d}. {clean_name:<50} AvgNormalizedRank={row.AvgNormalizedRank:.3f}")
+        df_consistent = pd.DataFrame(avg_ranks, columns=["Headphone", "AvgNormalizedRank"])
+        df_consistent = df_consistent.sort_values(by="AvgNormalizedRank", ascending=False).reset_index(drop=True)
 
-            # Plot only tonally balanced top once
-            filtered_ranking = [r for r in all_rankings[0] if r[0] in consistent_top]
-            if filtered_ranking:
-                plot_headphones(
-                    args.measurements_dir,
-                    target_freq,
-                    target_resp,
-                    filtered_ranking,
-                    top=len(filtered_ranking),
-                    weight_label="Tonally Balanced",
-                    sort_metric=args.sort
-                )
+        # Print top-N or full consistent list (strip .csv in print)
+        top_to_show = min(args.top, len(df_consistent)) if args.top else len(df_consistent)
+        if args.top:
+            print(f"\nTop {top_to_show} tonally balanced headphones by average normalized rank:\n")
+        else:
+            print(f"\nAll tonally balanced headphones by average normalized rank:\n")
+
+        for i, row in enumerate(df_consistent.head(top_to_show).itertuples(), 1):
+            clean_name = os.path.splitext(row.Headphone)[0]
+            print(f"{i:3d}. {clean_name:<50} AvgNormalizedRank={row.AvgNormalizedRank:.3f}")
+
+        # Build a filtered ranking sorted by AvgNormalizedRank descending for plotting
+        # We take RMSE/Pref/Combined from the first weighting's full ranking (if available)
+        rank_map_first = {r[0]: (r[1], r[2], r[3]) for r in all_rankings[0]}
+        filtered = []
+        for fname, avg in df_consistent.itertuples(index=False):
+            if fname in rank_map_first:
+                rmse, pref, _ = rank_map_first[fname]
+                filtered.append((fname, rmse, pref, avg))
+        # Sort by avg (already sorted in df_consistent) but ensure ordering aligns
+        filtered_sorted = sorted(filtered, key=lambda x: x[3], reverse=True)
+
+        # Plot only the tonally balanced top once (top_to_show)
+        if filtered_sorted:
+            plot_headphones(
+                args.measurements_dir,
+                target_freq,
+                target_resp,
+                filtered_sorted[:top_to_show],
+                top=len(filtered_sorted[:top_to_show]),
+                weight_label="Tonally Balanced",
+                sort_metric="AvgNormalizedRank"
+            )
 
     else:
         # Single weighting
@@ -316,7 +366,8 @@ def main():
             weight_func,
             weight_label,
             args.sort,
-            verbose=True
+            verbose=True,
+            top=args.top
         )
 
         # Plot single weighting top if requested
