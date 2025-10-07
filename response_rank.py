@@ -9,6 +9,7 @@ import numpy as np
 import plotly.graph_objects as go
 from sklearn.linear_model import LinearRegression
 from scipy.stats import spearmanr
+from scipy.signal import savgol_filter
 
 # ----------------------------------------------------------------------
 # Args
@@ -279,7 +280,6 @@ def main():
         ]
 
         all_rankings = []
-        # Run each weighting, print rankings (top if requested), but do NOT plot individual runs
         for func, label in weightings:
             ranking = rank_headphones(
                 args.measurements_dir,
@@ -293,7 +293,6 @@ def main():
             )
             all_rankings.append(ranking)
 
-        # Determine tonally balanced top headphones across all weightings
         top_n = args.top or len(all_rankings[0])
         top_sets = [set([r[0] for r in ranking[:top_n]]) for ranking in all_rankings]
         consistent_top = set.intersection(*top_sets)
@@ -302,7 +301,6 @@ def main():
             print("\nNo headphones appear in the top-{0} across all weightings.".format(top_n))
             return
 
-        # For each consistent headphone compute average inverted normalized rank (best=1.0)
         avg_ranks = []
         for fname in consistent_top:
             ranks = []
@@ -314,10 +312,9 @@ def main():
         df_consistent = pd.DataFrame(avg_ranks, columns=["Headphone", "AvgNormalizedRank"])
         df_consistent = df_consistent.sort_values(by="AvgNormalizedRank", ascending=False).reset_index(drop=True)
 
-        # Print top-N or full consistent list (strip .csv in print)
         top_to_show = min(args.top, len(df_consistent)) if args.top else len(df_consistent)
         if args.top:
-            print(f"\nTop {top_to_show} tonally balanced headphones by average normalized rank:\n")
+            print(f"\nTop-{top_to_show} tonally balanced headphones by average normalized rank:\n")
         else:
             print(f"\nAll tonally balanced headphones by average normalized rank:\n")
 
@@ -325,27 +322,64 @@ def main():
             clean_name = os.path.splitext(row.Headphone)[0]
             print(f"{i:3d}. {clean_name:<50} AvgNormalizedRank={row.AvgNormalizedRank:.3f}")
 
-        # Build a filtered ranking sorted by AvgNormalizedRank descending for plotting
-        # We take RMSE/Pref/Combined from the first weighting's full ranking (if available)
         rank_map_first = {r[0]: (r[1], r[2], r[3]) for r in all_rankings[0]}
         filtered = []
         for fname, avg in df_consistent.itertuples(index=False):
             if fname in rank_map_first:
                 rmse, pref, _ = rank_map_first[fname]
                 filtered.append((fname, rmse, pref, avg))
-        # Sort by avg (already sorted in df_consistent) but ensure ordering aligns
         filtered_sorted = sorted(filtered, key=lambda x: x[3], reverse=True)
 
-        # Plot only the tonally balanced top once (top_to_show)
-        if filtered_sorted:
-            plot_headphones(
-                args.measurements_dir,
-                target_freq,
-                target_resp,
-                filtered_sorted[:top_to_show],
-                top=len(filtered_sorted[:top_to_show]),
-                weight_label="Tonally Balanced",
-                sort_metric="AvgNormalizedRank"
+        # -----------------------------
+        # Compute derived target curve
+        # -----------------------------
+        derived_responses = []
+        for fname, rmse, pref, avg in filtered_sorted[:top_to_show]:
+            meas_path = os.path.join(args.measurements_dir, fname)
+            meas = pd.read_csv(meas_path)
+            freq, resp = meas.iloc[:, 0].values, meas.iloc[:, 1].values
+            interp_resp = np.interp(target_freq, freq, resp)
+            norm_resp = normalize_at_1kHz(target_freq, interp_resp)
+            derived_responses.append(norm_resp)
+
+        if derived_responses:
+            derived_target = np.mean(derived_responses, axis=0)
+            # Apply Savitzky-Golay smoothing to remove jaggedness
+            derived_target_smooth = savgol_filter(derived_target, window_length=101, polyorder=2)
+
+            # Plot all together
+            fig = go.Figure()
+            # Original target
+            target_norm = normalize_at_1kHz(target_freq, target_resp)
+            fig.add_trace(go.Scatter(x=target_freq, y=target_norm, mode='lines',
+                                     name='Original Target', line=dict(color='black', width=2)))
+            # Derived target
+            fig.add_trace(go.Scatter(x=target_freq, y=derived_target_smooth, mode='lines',
+                                     name='Derived Target (empirical neutral)',
+                                     line=dict(color='orange', width=3, dash='dot')))
+            # Plot top headphones
+            for fname, rmse, pref, avg in filtered_sorted[:top_to_show]:
+                meas = pd.read_csv(os.path.join(args.measurements_dir, fname))
+                freq, resp = meas.iloc[:, 0].values, meas.iloc[:, 1].values
+                meas_norm = normalize_at_1kHz(freq, resp)
+                clean_name = os.path.splitext(fname)[0]
+                fig.add_trace(go.Scatter(
+                    x=freq, y=meas_norm, mode='lines',
+                    name=f"{clean_name} (AvgNorm={avg:.3f})"
+                ))
+
+            fig.update_layout(
+                title=f"Tonally Balanced Top-{top_to_show} vs Targets",
+                xaxis_type='log', xaxis_title='Frequency (Hz)',
+                yaxis_title='Response (dB)',
+                template='plotly_white', hovermode='x unified',
+                margin=dict(t=100, b=80)
+            )
+            fig.show()
+
+            # Export derived target CSV to current directory
+            pd.DataFrame({'Frequency': target_freq, 'dB': derived_target_smooth}).to_csv(
+                "Derived_Target.csv", index=False
             )
 
     else:
