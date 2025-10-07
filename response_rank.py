@@ -163,9 +163,10 @@ def plot_headphones(measurements_dir, target_freq, target_resp, ranking, top=Non
             meas=pd.read_csv(os.path.join(measurements_dir,fname))
             meas_freq,meas_resp=meas.iloc[:,0].values,meas.iloc[:,1].values
             meas_norm=normalize_at_1kHz(meas_freq,meas_resp)
+            clean_name = os.path.splitext(fname)[0]
             fig.add_trace(go.Scatter(
                 x=meas_freq,y=meas_norm,mode='lines',
-                name=f"{fname} (RMSE={rmse:.2f}, Pref={pref:.2f}, Comb={comb:.2f})"
+                name=f"{clean_name} (RMSE={rmse:.2f}, Pref={pref:.2f}, Comb={comb:.2f})"
             ))
         fig.update_layout(
             title=f"{title_suffix} vs Target ({weight_label})",
@@ -281,7 +282,8 @@ def main():
             else:
                 print(f"\nAll tonally balanced headphones by average normalized rank:\n")
             for i, row in enumerate(df_consistent.head(top_to_show).itertuples(), 1):
-                print(f"{i:3d}. {row.Headphone:<50} AvgNormalizedRank={row.AvgNormalizedRank:.3f}")
+                clean_name = os.path.splitext(row.Headphone)[0]
+                print(f"{i:3d}. {clean_name:<50} AvgNormalizedRank={row.AvgNormalizedRank:.3f}")
 
             # Plot only tonally balanced top once
             filtered_ranking = [r for r in all_rankings[0] if r[0] in consistent_top]
@@ -292,7 +294,7 @@ def main():
                     target_resp,
                     filtered_ranking,
                     top=len(filtered_ranking),
-                    weight_label="Tonally Balanced Top",
+                    weight_label="Tonally Balanced",
                     sort_metric=args.sort
                 )
 
