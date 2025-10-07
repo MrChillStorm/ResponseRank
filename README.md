@@ -41,7 +41,7 @@ This model estimates listener preference from headphone frequency response using
   * **C-weighting** (for loud/high-level listening)
   * **Flat** (no weighting)
 
-* **Consistent top headphones**: With `--all-weightings`, the script identifies headphones that consistently appear in the top ranks across **Flat, A, B, and C weightings**. Only the consistent top list is plotted to reduce clutter.
+* **Tonally balanced top headphones**: With `--all-weightings`, the script identifies headphones that consistently appear in the top ranks across **Flat, A, B, and C weightings**. Only the tonally balanced top list is plotted to reduce clutter.
 
 * Interactive Plotly plots:
 
@@ -81,7 +81,7 @@ python response_rank.py <measurements_dir> <target_csv> [options]
 | `--aweight`                 | Use A-weighting for RMSE                                                                               |
 | `--bweight`                 | Use B-weighting for RMSE (medium levels)                                                               |
 | `--cweight`                 | Use C-weighting for RMSE                                                                               |
-| `--all-weightings`          | Run all weightings (Flat, A, B, C) and show **consistent top headphones**                              |
+| `--all-weightings`          | Run all weightings (Flat, A, B, C) and show **tonally balanced top headphones**                        |
 | `--top N`                   | Plot the top N ranked headphones                                                                       |
 | `--ranking R1,R2,...`       | Plot specific ranked items by their rank number                                                        |
 | `--sort combined rmse pref` | Sort the printed rankings by **combined score**, **RMSE**, or **preference score** (default: combined) |
@@ -104,7 +104,7 @@ This plots the top 10 headphones ranked using **A-weighted RMSE** combined with 
 
 ---
 
-#### All Weightings / Consistent Top
+#### All Weightings / Tonally Balanced Top
 
 ```bash
 python response_rank.py \
@@ -113,7 +113,7 @@ python response_rank.py \
   --all-weightings --top 10
 ```
 
-This runs each weighting individually, finds the headphones that rank in the top-N across all weightings, and plots only these consistent top headphones to reduce visual clutter.
+This runs each weighting individually, finds the headphones that rank in the top-N across all weightings, and plots only these tonally balanced top headphones to reduce visual clutter.
 
 ---
 
@@ -133,10 +133,10 @@ Ranked headphones (sorted by combined):
 ...
 ```
 
-**Consistent Top Across All Weightings**
+**Tonally Balanced Top Across All Weightings**
 
 ```bash
-Top 3 consistent headphones by average normalized rank:
+Top 3 tonally balanced headphones by average normalized rank:
 
                                        Headphone  AvgNormalizedRank
 0                         Sennheiser HD 560S.csv              0.800
