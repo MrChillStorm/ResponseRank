@@ -22,7 +22,7 @@ def parse_args():
     group.add_argument("--aweight", action="store_true", help="Use A-weighting for RMSE.")
     group.add_argument("--bweight", action="store_true", help="Use B-weighting for RMSE (medium levels).")
     group.add_argument("--cweight", action="store_true", help="Use C-weighting for RMSE.")
-    parser.add_argument("--all-weightings", action="store_true", help="Run all weightings (Flat, A, B, C) and show consistent top headphones.")
+    parser.add_argument("--all-weightings", action="store_true", help="Run all weightings (Flat, A, B, C) and show tonally balanced top headphones.")
     parser.add_argument("--top", type=int, help="Plot top N headphones.")
     parser.add_argument("--ranking", type=str, help="Comma-separated rank numbers to plot (e.g. 1,3,5).")
     parser.add_argument("--sort", type=str, choices=["combined","rmse","pref"], default="combined",
@@ -258,7 +258,7 @@ def main():
             )
             all_rankings.append(ranking)
 
-        # Determine consistent top headphones across all weightings
+        # Determine tonally balanced top headphones across all weightings
         top_n = args.top or len(all_rankings[0])
         top_sets = [set([r[0] for r in ranking[:top_n]]) for ranking in all_rankings]
         consistent_top = set.intersection(*top_sets)
@@ -277,13 +277,13 @@ def main():
 
             top_to_show = min(args.top, len(df_consistent)) if args.top else len(df_consistent)
             if args.top:
-                print(f"\nTop {top_to_show} consistent headphones by average normalized rank:\n")
+                print(f"\nTop {top_to_show} tonally balanced headphones by average normalized rank:\n")
             else:
-                print(f"\nAll consistent headphones by average normalized rank:\n")
+                print(f"\nAll tonally balanced headphones by average normalized rank:\n")
             for i, row in enumerate(df_consistent.head(top_to_show).itertuples(), 1):
                 print(f"{i:3d}. {row.Headphone:<50} AvgNormalizedRank={row.AvgNormalizedRank:.3f}")
 
-            # Plot only consistent top once
+            # Plot only tonally balanced top once
             filtered_ranking = [r for r in all_rankings[0] if r[0] in consistent_top]
             if filtered_ranking:
                 plot_headphones(
@@ -292,7 +292,7 @@ def main():
                     target_resp,
                     filtered_ranking,
                     top=len(filtered_ranking),
-                    weight_label="Consistent Top",
+                    weight_label="Tonally Balanced Top",
                     sort_metric=args.sort
                 )
 
