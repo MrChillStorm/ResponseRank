@@ -298,7 +298,7 @@ def main():
         consistent_top = set.intersection(*top_sets)
 
         if not consistent_top:
-            print("\nNo headphones appear in the top-{0} across all weightings.".format(top_n))
+            print(f"\nNo headphones appear in the top-{top_n} across all weightings.")
             return
 
         avg_ranks = []
@@ -313,10 +313,7 @@ def main():
         df_consistent = df_consistent.sort_values(by="AvgNormalizedRank", ascending=False).reset_index(drop=True)
 
         top_to_show = min(args.top, len(df_consistent)) if args.top else len(df_consistent)
-        if args.top:
-            print(f"\nTop-{top_to_show} tonally balanced headphones by average normalized rank:\n")
-        else:
-            print(f"\nAll tonally balanced headphones by average normalized rank:\n")
+        print(f"\nTop-{top_to_show} tonally balanced headphones by average normalized rank:\n")
 
         for i, row in enumerate(df_consistent.head(top_to_show).itertuples(), 1):
             clean_name = os.path.splitext(row.Headphone)[0]
@@ -344,20 +341,115 @@ def main():
 
         if derived_responses:
             derived_target = np.mean(derived_responses, axis=0)
-            # Apply Savitzky-Golay smoothing to remove jaggedness
-            derived_target_smooth = savgol_filter(derived_target, window_length=101, polyorder=2)
 
+            # ------------------------------------------------------------
+            # Auto-smoothing via L-curve elbow method
+            # ------------------------------------------------------------
+            def auto_savgol_elbow(freqs, response,
+                                  polyorder=2,
+                                  min_window=131,
+                                  max_window=None,
+                                  step=2,
+                                  verbose=True):
+                response = np.asarray(response)
+                freqs = np.asarray(freqs)
+                N = len(response)
+                if max_window is None:
+                    max_window = N if N % 2 == 1 else N - 1
+                else:
+                    max_window = min(max_window, N if N % 2 == 1 else N - 1)
+
+                windows = []
+                w = min_window if min_window % 2 == 1 else min_window + 1
+                while w <= max_window:
+                    windows.append(w)
+                    w += step
+                    if w % 2 == 0:
+                        w += 1
+                if len(windows) < 3:
+                    w = min(101, max_window)
+                    if w % 2 == 0:
+                        w += 1 if w < max_window else -1
+                    sm = savgol_filter(response, w, polyorder)
+                    if verbose:
+                        print(f"[auto_savgol_elbow] Not enough windows to optimize; using window={w}")
+                    return sm, w
+
+                energies, fidelities, smoothed_list = [], [], []
+                for w in windows:
+                    if w <= polyorder:
+                        energies.append(np.inf)
+                        fidelities.append(np.inf)
+                        smoothed_list.append(None)
+                        continue
+                    sm = savgol_filter(response, w, polyorder)
+                    smoothed_list.append(sm)
+                    d = np.gradient(sm, freqs)
+                    E = np.sum(d**2)
+                    F = np.mean((sm - response)**2)
+                    energies.append(E)
+                    fidelities.append(F)
+
+                energies = np.array(energies)
+                fidelities = np.array(fidelities)
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    xs = np.log(energies)
+                    ys = np.log(fidelities)
+                valid = np.isfinite(xs) & np.isfinite(ys)
+                if valid.sum() < 3:
+                    mid = windows[len(windows)//2]
+                    sm = savgol_filter(response, mid, polyorder)
+                    if verbose:
+                        print(f"[auto_savgol_elbow] insufficient valid points, using window={mid}")
+                    return sm, mid
+
+                winv = np.array(windows)[valid]
+                xs, ys = xs[valid], ys[valid]
+
+                angles = np.zeros(len(xs))
+                for i in range(1, len(xs) - 1):
+                    v1 = np.array([xs[i] - xs[i-1], ys[i] - ys[i-1]])
+                    v2 = np.array([xs[i+1] - xs[i], ys[i+1] - ys[i]])
+                    n1, n2 = np.linalg.norm(v1), np.linalg.norm(v2)
+                    if n1 == 0 or n2 == 0:
+                        angles[i] = 0.0
+                        continue
+                    cosang = np.clip(np.dot(v1, v2) / (n1 * n2), -1.0, 1.0)
+                    angles[i] = np.arccos(cosang)
+
+                idx = np.argmax(angles)
+                chosen_window = int(winv[idx]) if 0 < idx < len(xs) - 1 else int(winv[len(winv)//2])
+                chosen_sm = savgol_filter(response, chosen_window, polyorder)
+
+                if verbose:
+                    print(f"[auto_savgol_elbow] tested windows: {windows}")
+                    print(f"[auto_savgol_elbow] chosen window={chosen_window}")
+
+                return chosen_sm, chosen_window
+
+            # Apply optimized smoothing
+            derived_target_smooth, chosen_window = auto_savgol_elbow(
+                target_freq, derived_target, polyorder=2,
+                min_window=131, max_window=151, step=2, verbose=False
+            )
+
+            # -----------------------------
             # Plot all together
+            # -----------------------------
             fig = go.Figure()
-            # Original target
+
             target_norm = normalize_at_1kHz(target_freq, target_resp)
-            fig.add_trace(go.Scatter(x=target_freq, y=target_norm, mode='lines',
-                                     name='Original Target', line=dict(color='black', width=2)))
-            # Derived target
-            fig.add_trace(go.Scatter(x=target_freq, y=derived_target_smooth, mode='lines',
-                                     name='Derived Target (empirical neutral)',
-                                     line=dict(color='orange', width=3, dash='dot')))
-            # Plot top headphones
+            fig.add_trace(go.Scatter(
+                x=target_freq, y=target_norm, mode='lines',
+                name='Original Target', line=dict(color='black', width=2)
+            ))
+
+            fig.add_trace(go.Scatter(
+                x=target_freq, y=derived_target_smooth, mode='lines',
+                name='Derived Target (empirical neutral)',
+                line=dict(color='orange', width=3, dash='dot')
+            ))
+
             for fname, rmse, pref, avg in filtered_sorted[:top_to_show]:
                 meas = pd.read_csv(os.path.join(args.measurements_dir, fname))
                 freq, resp = meas.iloc[:, 0].values, meas.iloc[:, 1].values
@@ -377,7 +469,6 @@ def main():
             )
             fig.show()
 
-            # Export derived target CSV to current directory
             pd.DataFrame({'frequency': target_freq, 'raw': derived_target_smooth}).to_csv(
                 "Derived_Target.csv", index=False
             )
@@ -404,7 +495,6 @@ def main():
             top=args.top
         )
 
-        # Plot single weighting top if requested
         plot_headphones(
             args.measurements_dir,
             target_freq,
