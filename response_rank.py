@@ -378,7 +378,7 @@ def main():
             fig.show()
 
             # Export derived target CSV to current directory
-            pd.DataFrame({'Frequency': target_freq, 'dB': derived_target_smooth}).to_csv(
+            pd.DataFrame({'frequency': target_freq, 'raw': derived_target_smooth}).to_csv(
                 "Derived_Target.csv", index=False
             )
 
