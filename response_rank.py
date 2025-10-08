@@ -359,10 +359,10 @@ def main():
             mask_hump = (2500, 4500)
             # Find the peak amplitude in the original Oratory target in that region
             idx_mask = (target_freq >= mask_hump[0]) & (target_freq <= mask_hump[1])
-            target_peak = np.max(target_resp[idx_mask])
+            target_peak = np.max(derived_target[idx_mask])
 
             # Scan candidate sigmas
-            sigma_candidates = np.linspace(1, 20, 1000)
+            sigma_candidates = np.linspace(1, 20, 100)
             best_sigma = sigma_candidates[0]
             min_error = float('inf')
             for sigma in sigma_candidates:
