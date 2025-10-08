@@ -115,11 +115,13 @@ python response_rank.py \
 
 This runs each weighting individually, finds the headphones that rank in the top-N across all weightings, and plots only these tonally balanced top headphones to reduce visual clutter.
 
-* **Derived target curve from top headphones**: When `--all-weightings` is used, the script computes an **empirical neutral target curve** by averaging the normalized responses of the tonally balanced top headphones. The derived curve:
+* **Derived target curve from top headphones**: When `--all-weightings` is used, the script computes an **empirical neutral curve** by averaging the normalized responses of the tonally balanced top headphones. This curve:
 
-  * Applies smoothing for a clean response.
-  * Is plotted together with the original target and top headphone traces.
-  * Is exported as `Derived_Target.csv` in the current directory for use in further analysis or EQing.
+  * Summarizes the common tonal characteristics of the best-performing headphones.
+  * Becomes the **reference target for identifying real-world neutral headphones** in this analysis.
+  * Is smoothed for clarity and plotted alongside the original target and top headphone traces.
+  * Is exported as `Derived_Target.csv` for reference or optional use.
+  * **Important**: While it serves as the effective target within this script, it is **not necessarily intended as a general EQ target** for listening — it is primarily a tool for analysis and ranking.
 
   <p align="center">
    <img src="https://i.imgur.com/RfmCffi.png" alt="Derived target curve plot" width="1244">
