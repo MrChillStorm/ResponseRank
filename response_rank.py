@@ -9,7 +9,7 @@ import numpy as np
 import plotly.graph_objects as go
 from sklearn.linear_model import LinearRegression
 from scipy.stats import spearmanr
-from scipy.signal import savgol_filter
+from scipy.ndimage import gaussian_filter1d
 
 # ----------------------------------------------------------------------
 # Args
@@ -94,6 +94,17 @@ def smooth_one_third_octave_rms(freq, resp_db):
 def normalize_at_1kHz(freq, resp):
     val_1k = np.interp(1000, freq, resp)
     return resp - val_1k
+
+def gaussian_smooth(freq, resp, sigma=3.0):
+    """
+    Apply Gaussian smoothing to a response curve.
+    freq: frequency array (Hz)
+    resp: response array (dB)
+    sigma: smoothing sigma (in index units)
+    """
+    resp = np.asarray(resp)
+    smoothed = gaussian_filter1d(resp, sigma=sigma)
+    return smoothed
 
 # ----------------------------------------------------------------------
 # Metrics
@@ -342,111 +353,43 @@ def main():
         if derived_responses:
             derived_target = np.mean(derived_responses, axis=0)
 
-            # ------------------------------------------------------------
-            # Auto-smoothing via L-curve elbow method
-            # ------------------------------------------------------------
-            def auto_savgol_elbow(freqs, response,
-                                  polyorder=2,
-                                  min_window=131,
-                                  max_window=None,
-                                  step=2,
-                                  verbose=True):
-                response = np.asarray(response)
-                freqs = np.asarray(freqs)
-                N = len(response)
-                if max_window is None:
-                    max_window = N if N % 2 == 1 else N - 1
-                else:
-                    max_window = min(max_window, N if N % 2 == 1 else N - 1)
+            # -----------------------------
+            # Find optimal sigma for 2.5–4.5 kHz hump
+            # -----------------------------
+            mask_hump = (2500, 4500)
+            # Find the peak amplitude in the original Oratory target in that region
+            idx_mask = (target_freq >= mask_hump[0]) & (target_freq <= mask_hump[1])
+            target_peak = np.max(target_resp[idx_mask])
 
-                windows = []
-                w = min_window if min_window % 2 == 1 else min_window + 1
-                while w <= max_window:
-                    windows.append(w)
-                    w += step
-                    if w % 2 == 0:
-                        w += 1
-                if len(windows) < 3:
-                    w = min(101, max_window)
-                    if w % 2 == 0:
-                        w += 1 if w < max_window else -1
-                    sm = savgol_filter(response, w, polyorder)
-                    if verbose:
-                        print(f"[auto_savgol_elbow] Not enough windows to optimize; using window={w}")
-                    return sm, w
+            # Scan candidate sigmas
+            sigma_candidates = np.linspace(1, 20, 1000)
+            best_sigma = sigma_candidates[0]
+            min_error = float('inf')
+            for sigma in sigma_candidates:
+                smoothed = gaussian_filter1d(derived_target, sigma=sigma)
+                peak_amp = np.max(smoothed[idx_mask])
+                error = abs(peak_amp - target_peak)
+                if error < min_error:
+                    min_error = error
+                    best_sigma = sigma
 
-                energies, fidelities, smoothed_list = [], [], []
-                for w in windows:
-                    if w <= polyorder:
-                        energies.append(np.inf)
-                        fidelities.append(np.inf)
-                        smoothed_list.append(None)
-                        continue
-                    sm = savgol_filter(response, w, polyorder)
-                    smoothed_list.append(sm)
-                    d = np.gradient(sm, freqs)
-                    E = np.sum(d**2)
-                    F = np.mean((sm - response)**2)
-                    energies.append(E)
-                    fidelities.append(F)
+            #print(f"Optimal sigma for hump amplitude match: {best_sigma:.3f}")
 
-                energies = np.array(energies)
-                fidelities = np.array(fidelities)
-                with np.errstate(divide='ignore', invalid='ignore'):
-                    xs = np.log(energies)
-                    ys = np.log(fidelities)
-                valid = np.isfinite(xs) & np.isfinite(ys)
-                if valid.sum() < 3:
-                    mid = windows[len(windows)//2]
-                    sm = savgol_filter(response, mid, polyorder)
-                    if verbose:
-                        print(f"[auto_savgol_elbow] insufficient valid points, using window={mid}")
-                    return sm, mid
-
-                winv = np.array(windows)[valid]
-                xs, ys = xs[valid], ys[valid]
-
-                angles = np.zeros(len(xs))
-                for i in range(1, len(xs) - 1):
-                    v1 = np.array([xs[i] - xs[i-1], ys[i] - ys[i-1]])
-                    v2 = np.array([xs[i+1] - xs[i], ys[i+1] - ys[i]])
-                    n1, n2 = np.linalg.norm(v1), np.linalg.norm(v2)
-                    if n1 == 0 or n2 == 0:
-                        angles[i] = 0.0
-                        continue
-                    cosang = np.clip(np.dot(v1, v2) / (n1 * n2), -1.0, 1.0)
-                    angles[i] = np.arccos(cosang)
-
-                idx = np.argmax(angles)
-                chosen_window = int(winv[idx]) if 0 < idx < len(xs) - 1 else int(winv[len(winv)//2])
-                chosen_sm = savgol_filter(response, chosen_window, polyorder)
-
-                if verbose:
-                    print(f"[auto_savgol_elbow] tested windows: {windows}")
-                    print(f"[auto_savgol_elbow] chosen window={chosen_window}")
-
-                return chosen_sm, chosen_window
-
-            # Apply optimized smoothing
-            derived_target_smooth, chosen_window = auto_savgol_elbow(
-                target_freq, derived_target, polyorder=2,
-                min_window=131, max_window=151, step=2, verbose=False
-            )
+            # Apply Gaussian smoothing with optimal sigma
+            derived_target_smooth = gaussian_smooth(target_freq, derived_target, sigma=best_sigma)
 
             # -----------------------------
             # Plot all together
             # -----------------------------
             fig = go.Figure()
-
             target_norm = normalize_at_1kHz(target_freq, target_resp)
             fig.add_trace(go.Scatter(
                 x=target_freq, y=target_norm, mode='lines',
                 name='Original Target', line=dict(color='black', width=2)
             ))
-
             fig.add_trace(go.Scatter(
                 x=target_freq, y=derived_target_smooth, mode='lines',
-                name='Derived Target (empirical neutral)',
+                name=f'Derived Target (empirical neutral, σ={best_sigma:.2f})',
                 line=dict(color='orange', width=3, dash='dot')
             ))
 
@@ -469,6 +412,9 @@ def main():
             )
             fig.show()
 
+            # -----------------------------
+            # Export to CSV
+            # -----------------------------
             pd.DataFrame({'frequency': target_freq, 'raw': derived_target_smooth}).to_csv(
                 "Derived_Target.csv", index=False
             )
