@@ -136,6 +136,14 @@ This runs each weighting individually, finds the headphones that rank in the top
 
   Both targets were smoothed and idealized through spline fitting for clean, continuous response shapes suitable for EQ and evaluation. While the derived target reflects **what the best headphones measure like**, these two represent **what they should sound like**, and are faithful, real-world listening targets rather than analytical averages.
 
+* **response_idealize.py**
+
+  Generates a mathematically idealized version of a derived target curve by smoothing the response, detecting the natural midrange hump, and fitting a cubic spline through that region to remove irregularities such as notches or overshoot. The script preserves the overall tonal contour including the bass and treble transitions while producing a clean, continuous target suitable for EQ design and headphone evaluation. It accepts optional `--input` and `--output` arguments, and renders an interactive Plotly plot with unified hover readouts for precise visual comparison between the raw, smoothed, and idealized curves.
+
+  <p align="center">
+    <img src="https://i.imgur.com/4Z40r4o.png" alt="Derived target curve plot" width="1030">
+  </p>
+
 ---
 
 ### Sample Output
