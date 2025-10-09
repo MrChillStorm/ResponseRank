@@ -127,6 +127,15 @@ This runs each weighting individually, finds the headphones that rank in the top
    <img src="https://i.imgur.com/RfmCffi.png" alt="Derived target curve plot" width="1244">
   </p>
 
+* **Idealized EQ Targets**
+
+  Two **idealized EQ targets** have been created from the empirically derived curve using the **top 10 real-world headphones** ranked by ResponseRank:
+
+  * **`MCS-NeutralIdeal.csv`** – an idealized version of the **empirical neutral curve**, preserving the natural contour found in the best-measuring headphones and closely following the **Oratory1990 optimum hifi over-ear** target.
+  * **`MCS-HarmanIdeal.csv`** – a counterpart based on the same dataset but shaped toward the **Harman over-ear 2018 target**, capturing how top-performing headphones interpret Harman in practice.
+
+  Both targets were smoothed and idealized through spline fitting for clean, continuous response shapes suitable for EQ and evaluation. While the derived target reflects **what the best headphones measure like**, these two represent **what they should sound like**, and are faithful, real-world listening targets rather than analytical averages.
+
 ---
 
 ### Sample Output
