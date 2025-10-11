@@ -2,9 +2,8 @@
 
 import pandas as pd
 import numpy as np
+from scipy.interpolate import UnivariateSpline
 from scipy.ndimage import gaussian_filter1d
-from scipy.signal import find_peaks
-from scipy.interpolate import CubicSpline
 import plotly.graph_objects as go
 import plotly.io as pio
 import argparse
@@ -15,12 +14,50 @@ import sys
 default_input_file = "Derived_Target.csv"
 default_output_file = "Idealized_Target.csv"
 
-sigma_octaves = 0.12       # gentle smoothing
-hump_search = (1500, 8000) # where to look for hump
-reference_hz = 500         # normalization reference
+smoothing_factor = 0.007   # spline smoothness (0.05–0.2 = close fit, higher = smoother)
+reference_hz = 1000        # normalization reference
+anchor_freqs = []          # anchor points in Hz
+
+
+# === REW-Style Variable Smoothing ===
+def rew_variable_smoothing(f, mag_db):
+    """
+    Approximates REW's 'Variable' smoothing:
+    1/48 octave below 100 Hz,
+    1/3 octave above 10 kHz,
+    transitions between those limits with 1/6 octave around 1 kHz.
+    """
+    f = np.asarray(f)
+    mag = np.asarray(mag_db)
+    logf = np.log10(f)
+
+    # determine octave fraction at each frequency
+    N = np.zeros_like(f)
+    for i, freq in enumerate(f):
+        if freq <= 100:
+            N[i] = 48
+        elif freq < 1000:
+            N[i] = 48 + (6 - 48) * np.log10(freq / 100) / np.log10(1000 / 100)
+        elif freq < 10000:
+            N[i] = 6 + (3 - 6) * np.log10(freq / 1000) / np.log10(10000 / 1000)
+        else:
+            N[i] = 3
+
+    # convert octave fraction -> Gaussian sigma width (in log frequency space)
+    bandwidths = f * (2 ** (1 / (2 * N)) - 2 ** (-1 / (2 * N)))
+    sigma = np.log10(1 + bandwidths / f)
+    sigma_samples = sigma / np.mean(np.diff(logf))
+
+    # apply smoothing (Gaussian with varying sigma)
+    smoothed = np.zeros_like(mag)
+    for i, s in enumerate(sigma_samples):
+        smoothed[i] = gaussian_filter1d(mag, s)[i]
+
+    return smoothed
+
 
 # === 0. Parse command-line arguments ===
-parser = argparse.ArgumentParser(description="Idealize a derived target curve.")
+parser = argparse.ArgumentParser(description="Idealize a derived target curve with anchor points and REW-style smoothing.")
 parser.add_argument("-i", "--input", type=str, default=default_input_file,
                     help=f"Input CSV file (default: {default_input_file})")
 parser.add_argument("-o", "--output", type=str, default=default_output_file,
@@ -44,92 +81,63 @@ pio.renderers.default = "browser"
 # === 1. Load ===
 df = pd.read_csv(input_file)
 f = df["frequency"].to_numpy()
-y = df["raw"].to_numpy()
+y_raw = df["raw"].to_numpy()
 
-# === 2. Smooth ===
+# === 2. Apply REW-style variable smoothing ===
+y_smooth = rew_variable_smoothing(f, y_raw)
+
+# === 3. Prepare data for spline ===
 logf = np.log10(f)
-sigma_points = sigma_octaves / np.mean(np.diff(logf))
-y_smooth = gaussian_filter1d(y, sigma_points)
+anchor_logf = np.log10(anchor_freqs) if anchor_freqs else []
+anchor_y = np.interp(anchor_freqs, f, y_smooth) if anchor_freqs else []
 
-# === 3. Detect hump automatically ===
-search_mask = (f >= hump_search[0]) & (f <= hump_search[1])
-search_f = f[search_mask]
-search_y = y_smooth[search_mask]
+# === 4. Smoothing spline over smoothed curve ===
+weights = np.ones_like(y_smooth)
+if anchor_freqs:
+    anchor_indices = [np.argmin(np.abs(f - af)) for af in anchor_freqs]
+    weights[anchor_indices] = 5  # higher weight for anchor points
 
-peaks, _ = find_peaks(search_y, distance=40)
-if len(peaks) == 0:
-    raise RuntimeError("No hump found in midrange region.")
-peak_idx = peaks[np.argmax(search_y[peaks])]
-peak_freq = search_f[peak_idx]
-peak_amp = search_y[peak_idx]
+spline = UnivariateSpline(logf, y_smooth, w=weights, s=len(f) * smoothing_factor)
+ideal = spline(logf)
 
-# find -3 dB boundaries
-half_height = peak_amp - 3
-left = search_f[np.where(search_y[:peak_idx] <= half_height)[0][-1]] if np.any(search_y[:peak_idx] <= half_height) else hump_search[0]
-right = search_f[peak_idx + np.where(search_y[peak_idx:] <= half_height)[0][0]] if np.any(search_y[peak_idx:] <= half_height) else hump_search[1]
-
-# === 4. Fit cubic spline through region + boundary anchors ===
-region_mask = (f >= left) & (f <= right)
-region_f = f[region_mask]
-region_y = y_smooth[region_mask]
-
-anchor_left_idx = np.where(f < left)[0][-1] if np.any(f < left) else 0
-anchor_right_idx = np.where(f > right)[0][0] if np.any(f > right) else len(f) - 1
-
-fit_f = np.concatenate(([f[anchor_left_idx]], region_f, [f[anchor_right_idx]]))
-fit_y = np.concatenate(([y_smooth[anchor_left_idx]], region_y, [y_smooth[anchor_right_idx]]))
-
-cs = CubicSpline(np.log10(fit_f), fit_y, bc_type='natural')
-ideal_region = cs(np.log10(region_f))
-
-# Normalize to preserve peak height
-ideal_region += peak_amp - np.max(ideal_region)
-
-# === 5. Merge ===
-ideal = y_smooth.copy()
-ideal[region_mask] = ideal_region
-
-# === 6. Keep bass as original below hump start ===
-bass_mask = f < left
-ideal[bass_mask] = y_smooth[bass_mask]
-
-# === 7. Normalize to reference ===
+# === 5. Normalize to reference ===
 ref = np.interp(reference_hz, f, ideal)
 ideal -= ref
+anchor_y_normalized = anchor_y - ref if anchor_freqs else []
 
-# === 8. Save ===
+# === 6. Save ===
 try:
     pd.DataFrame({"frequency": f, "raw": ideal}).to_csv(output_file, index=False)
 except Exception as e:
     sys.exit(f"Error saving output file '{output_file}': {e}")
 
-# === 9. Interactive Plot (Plotly, auto-sized) ===
+# === 7. Interactive Plot (Plotly) ===
 fig = go.Figure()
 
+# raw
 fig.add_trace(go.Scatter(
-    x=f, y=y, mode="lines", name="Raw derived",
+    x=f, y=y_raw, mode="lines", name="Raw derived",
     line=dict(color="Azure", width=1), opacity=0.4,
     hovertemplate="%{y:.2f} dB"
 ))
+
+# idealized
 fig.add_trace(go.Scatter(
-    x=f, y=y_smooth, mode="lines", name="Smoothed",
-    line=dict(color="#ff7f0e", width=1.5), opacity=0.6,
+    x=f, y=ideal, mode="lines", name="Idealized (spline of variable-smooth)",
+    line=dict(color="red", width=2),
     hovertemplate="%{y:.2f} dB"
 ))
-baseline = y_smooth  # the smoothed curve we want as reference
-fig.add_trace(go.Scatter(
-    x=f, 
-    y=ideal,  # visually lifted
-    customdata=np.round(ideal - np.interp(reference_hz, f, ideal) + np.interp(reference_hz, f, baseline), 2),
-    hovertemplate="%{customdata:.2f} dB",
-    name=f"Idealized (peak {peak_freq:.0f} Hz)",
-    line=dict(color='red', width=2)
-))
-fig.add_vline(x=left, line_width=1, line_dash="dash", line_color="black")
-fig.add_vline(x=right, line_width=1, line_dash="dash", line_color="black")
+
+# anchor points
+if anchor_freqs:
+    fig.add_trace(go.Scatter(
+        x=anchor_freqs, y=anchor_y_normalized, mode="markers", name="Anchor points",
+        marker=dict(color="yellow", size=8, symbol="circle"),
+        hovertemplate="%{x:.0f} Hz, %{y:.2f} dB"
+    ))
 
 fig.update_layout(
-    title="Idealized Target Curve",
+    title="Idealized Target Curve (Variable Smoothing)",
     xaxis=dict(title="Frequency (Hz)", type="log"),
     yaxis_title="Level (dB, normalized)",
     hovermode="x unified",
