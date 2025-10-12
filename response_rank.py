@@ -7,6 +7,7 @@ import argparse
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+import re
 from sklearn.linear_model import LinearRegression
 from scipy.stats import spearmanr
 from scipy.ndimage import gaussian_filter1d
@@ -29,6 +30,9 @@ def parse_args():
     parser.add_argument("--ranking", type=str, help="Comma-separated rank numbers to plot (e.g. 1,3,5).")
     parser.add_argument("--sort", type=str, choices=["combined","rmse","pref"], default="combined",
                         help="Sort by this metric for table and plot. Default: combined")
+    parser.add_argument("--filter", type=str,
+    help="Regular expression to filter headphone filenames (e.g. 'HD[56]00|DT 880').")
+
     return parser.parse_args()
 
 # ----------------------------------------------------------------------
@@ -220,18 +224,20 @@ def plot_headphones(measurements_dir, target_freq, target_resp, ranking, top=Non
 # ----------------------------------------------------------------------
 # Core ranking function
 # ----------------------------------------------------------------------
-def rank_headphones(measurements_dir, target_freq, target_resp, weight_func, weight_label, sort_metric="combined", verbose=True, top=None):
+def rank_headphones(measurements_dir, target_freq, target_resp, weight_func, weight_label,
+                    sort_metric="combined", verbose=True, top=None, regex_filter=None):
     """
     Rank headphones in a directory against a target response using RMSE and Pref metrics.
-
-    Returns:
-        ranking: List of tuples (filename, RMSE, Pref, CombinedScore) sorted by sort_metric.
     """
     weights = weight_func(target_freq)
     results = []
 
+    pattern = re.compile(regex_filter, re.IGNORECASE) if regex_filter else None
+
     for fname in sorted(os.listdir(measurements_dir)):
         if not fname.endswith(".csv"):
+            continue
+        if pattern and not pattern.search(fname):
             continue
         try:
             meas = pd.read_csv(os.path.join(measurements_dir, fname))
@@ -300,7 +306,8 @@ def main():
                 label,
                 args.sort,
                 verbose=True,
-                top=args.top
+                top=args.top,
+                regex_filter=args.filter
             )
             all_rankings.append(ranking)
 
@@ -385,7 +392,7 @@ def main():
             target_norm = normalize_at_1kHz(target_freq, target_resp)
             fig.add_trace(go.Scatter(
                 x=target_freq, y=target_norm, mode='lines',
-                name='Original Target', line=dict(color='black', width=2)
+                name='Original Target', line=dict(color='Red', width=2)
             ))
             fig.add_trace(go.Scatter(
                 x=target_freq, y=derived_target_smooth, mode='lines',
@@ -407,7 +414,7 @@ def main():
                 title=f"Tonally Balanced Top-{top_to_show} vs Targets",
                 xaxis_type='log', xaxis_title='Frequency (Hz)',
                 yaxis_title='Response (dB)',
-                template='plotly_white', hovermode='x unified',
+                template='plotly_dark', hovermode='x unified',
                 margin=dict(t=100, b=80)
             )
             fig.show()
@@ -438,7 +445,8 @@ def main():
             weight_label,
             args.sort,
             verbose=True,
-            top=args.top
+            top=args.top,
+            regex_filter=args.filter
         )
 
         plot_headphones(
