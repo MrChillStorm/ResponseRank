@@ -1,149 +1,146 @@
 #!/usr/bin/env python3
+"""
+response_idealize_rew_variable.py
 
-import pandas as pd
-import numpy as np
-from scipy.interpolate import UnivariateSpline
-from scipy.ndimage import gaussian_filter1d
-import plotly.graph_objects as go
-import plotly.io as pio
-import argparse
+Performs REW-style variable smoothing in log-frequency space with per-point
+normalized Gaussian kernels to preserve local energy and produce endpoint bends.
+"""
 import os
 import sys
+import argparse
+import numpy as np
+import pandas as pd
+from scipy.interpolate import UnivariateSpline
+import plotly.graph_objects as go
+import plotly.io as pio
 
 # === CONFIG ===
-default_input_file = "Derived_Target.csv"
-default_output_file = "Idealized_Target.csv"
+DEFAULT_INPUT = "Derived_Target.csv"
+DEFAULT_OUTPUT = "Idealized_Target.csv"
+REFERENCE_HZ = 1000
+ANCHOR_FREQS = []  # optional anchor points
+DEFAULT_POINTS_PER_OCTAVE = 48
 
-smoothing_factor = 0.007   # spline smoothness (0.05–0.2 = close fit, higher = smoother)
-reference_hz = 1000        # normalization reference
-anchor_freqs = []          # anchor points in Hz
+# === Octave fraction N per frequency ===
+def octave_fraction_N(freq):
+    N = np.empty_like(freq, dtype=float)
+    for i, f in enumerate(freq):
+        if f <= 100:
+            N[i] = 48.0
+        elif f < 1000:
+            N[i] = 48.0 + (6.0 - 48.0) * np.log10(f / 100.0) / np.log10(1000.0 / 100.0)
+        elif f < 10000:
+            N[i] = 6.0 + (3.0 - 6.0) * np.log10(f / 1000.0) / np.log10(10000.0 / 1000.0)
+        else:
+            N[i] = 3.0
+    return N
 
-
-# === REW-Style Variable Smoothing ===
-def rew_variable_smoothing(f, mag_db):
-    """
-    Approximates REW's 'Variable' smoothing:
-    1/48 octave below 100 Hz,
-    1/3 octave above 10 kHz,
-    transitions between those limits with 1/6 octave around 1 kHz.
-    """
+# === Core: variable log-space smoothing with per-point sigma and endpoint truncation ===
+def rew_variable_smoothing_logspace_preserve_energy(f, mag_db, strength=1.0, half_width_multiplier=4.0):
     f = np.asarray(f)
     mag = np.asarray(mag_db)
+
+    # convert to log-frequency
     logf = np.log10(f)
+    log_step = np.mean(np.diff(logf))
 
-    # determine octave fraction at each frequency
-    N = np.zeros_like(f)
-    for i, freq in enumerate(f):
-        if freq <= 100:
-            N[i] = 48
-        elif freq < 1000:
-            N[i] = 48 + (6 - 48) * np.log10(freq / 100) / np.log10(1000 / 100)
-        elif freq < 10000:
-            N[i] = 6 + (3 - 6) * np.log10(freq / 1000) / np.log10(10000 / 1000)
-        else:
-            N[i] = 3
+    # compute octave fraction N and sigma per point
+    N = octave_fraction_N(f)
+    bandwidths = f * (2 ** (1.0 / (2.0 * N)) - 2 ** (-1.0 / (2.0 * N)))
+    sigma_log = np.log10(1.0 + bandwidths / f) * strength
+    sigma_samples = sigma_log / log_step
+    sigma_samples = np.maximum(sigma_samples, 0.01)
 
-    # convert octave fraction -> Gaussian sigma width (in log frequency space)
-    bandwidths = f * (2 ** (1 / (2 * N)) - 2 ** (-1 / (2 * N)))
-    sigma = np.log10(1 + bandwidths / f)
-    sigma_samples = sigma / np.mean(np.diff(logf))
+    # smooth with endpoint truncation
+    y_smooth = np.empty_like(mag)
+    n = len(f)
+    idx = np.arange(n)
+    for i in range(n):
+        s = sigma_samples[i]
+        hw = int(np.ceil(half_width_multiplier * s))
+        left = max(0, i - hw)
+        right = min(n - 1, i + hw)
+        window_idx = idx[left:right + 1]
+        distances = window_idx - i
+        kernel = np.exp(-0.5 * (distances / s) ** 2)
+        kernel /= kernel.sum()
+        y_smooth[i] = np.dot(kernel, mag[window_idx])
 
-    # apply smoothing (Gaussian with varying sigma)
-    smoothed = np.zeros_like(mag)
-    for i, s in enumerate(sigma_samples):
-        smoothed[i] = gaussian_filter1d(mag, s)[i]
+    return y_smooth
 
-    return smoothed
+# === Main script & CLI ===
+def main():
+    parser = argparse.ArgumentParser(description="Idealize target curve with REW-style variable smoothing (log-space).")
+    parser.add_argument("-i", "--input", type=str, default=DEFAULT_INPUT)
+    parser.add_argument("-o", "--output", type=str, default=DEFAULT_OUTPUT)
+    parser.add_argument("--smoothing-strength", type=float, default=0.5)
+    parser.add_argument("--smoothing-factor", type=float, default=0.001)
+    parser.add_argument("--half-width-mult", type=float, default=4.0)
+    args = parser.parse_args()
 
+    if not os.path.isfile(args.input):
+        sys.exit(f"Error: Input file '{args.input}' not found.")
+    outdir = os.path.dirname(args.output) or "."
+    if not os.access(outdir, os.W_OK):
+        sys.exit(f"Error: Cannot write to output directory '{outdir}'.")
 
-# === 0. Parse command-line arguments ===
-parser = argparse.ArgumentParser(description="Idealize a derived target curve with anchor points and REW-style smoothing.")
-parser.add_argument("-i", "--input", type=str, default=default_input_file,
-                    help=f"Input CSV file (default: {default_input_file})")
-parser.add_argument("-o", "--output", type=str, default=default_output_file,
-                    help=f"Output CSV file (default: {default_output_file})")
-args = parser.parse_args()
+    pio.renderers.default = "browser"
 
-input_file = args.input
-output_file = args.output
+    df = pd.read_csv(args.input)
+    if "frequency" not in df.columns or "raw" not in df.columns:
+        sys.exit("Error: input CSV must contain 'frequency' and 'raw' columns.")
+    f = df["frequency"].to_numpy()
+    y_raw = df["raw"].to_numpy()
 
-# === 0b. Graceful file checks ===
-if not os.path.isfile(input_file):
-    sys.exit(f"Error: Input file '{input_file}' not found. Please check the path and try again.")
+    # apply variable log-space smoothing
+    y_smooth = rew_variable_smoothing_logspace_preserve_energy(
+        f, y_raw,
+        strength=args.smoothing_strength,
+        half_width_multiplier=args.half_width_mult
+    )
 
-output_dir = os.path.dirname(output_file) or "."
-if not os.access(output_dir, os.W_OK):
-    sys.exit(f"Error: Cannot write to output directory '{output_dir}'. Check permissions.")
+    # --- octave-energy preservation and 1kHz anchor ---
+    power = 10 ** (y_smooth / 10.0)
+    octave_widths = np.gradient(np.log2(f))
+    power *= octave_widths / np.mean(octave_widths)
+    y_smooth = 10 * np.log10(power)
 
-# open plot in full browser window
-pio.renderers.default = "browser"
+    ref_idx = np.argmin(np.abs(f - 1000))
+    y_smooth -= y_smooth[ref_idx] - y_raw[ref_idx]
 
-# === 1. Load ===
-df = pd.read_csv(input_file)
-f = df["frequency"].to_numpy()
-y_raw = df["raw"].to_numpy()
+    # spline fit
+    logf = np.log10(f)
+    weights = np.ones_like(y_smooth)
+    if len(ANCHOR_FREQS) > 0:
+        anchor_indices = [np.argmin(np.abs(f - af)) for af in ANCHOR_FREQS]
+        weights[anchor_indices] = 5.0
 
-# === 2. Apply REW-style variable smoothing ===
-y_smooth = rew_variable_smoothing(f, y_raw)
+    spline = UnivariateSpline(logf, y_smooth, w=weights, s=len(f) * args.smoothing_factor)
+    ideal = spline(logf)
 
-# === 3. Prepare data for spline ===
-logf = np.log10(f)
-anchor_logf = np.log10(anchor_freqs) if anchor_freqs else []
-anchor_y = np.interp(anchor_freqs, f, y_smooth) if anchor_freqs else []
+    # normalize to reference
+    ref = np.interp(REFERENCE_HZ, f, ideal)
+    ideal -= ref
 
-# === 4. Smoothing spline over smoothed curve ===
-weights = np.ones_like(y_smooth)
-if anchor_freqs:
-    anchor_indices = [np.argmin(np.abs(f - af)) for af in anchor_freqs]
-    weights[anchor_indices] = 5  # higher weight for anchor points
+    # save
+    pd.DataFrame({"frequency": f, "raw": ideal}).to_csv(args.output, index=False)
 
-spline = UnivariateSpline(logf, y_smooth, w=weights, s=len(f) * smoothing_factor)
-ideal = spline(logf)
+    # plot
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=f, y=y_raw, mode="lines", name="Raw", line=dict(color="Azure", width=1), opacity=0.4))
+    fig.add_trace(go.Scatter(x=f, y=y_smooth, mode="lines", name="Variable-smoothed", line=dict(color="#FFBF00", width=2, dash="dot")))
+    fig.add_trace(go.Scatter(x=f, y=ideal, mode="lines", name="Idealized (spline)", line=dict(color="red", width=2)))
 
-# === 5. Normalize to reference ===
-ref = np.interp(reference_hz, f, ideal)
-ideal -= ref
-anchor_y_normalized = anchor_y - ref if anchor_freqs else []
+    if len(ANCHOR_FREQS) > 0:
+        anchor_y = np.interp(ANCHOR_FREQS, f, y_smooth) - ref
+        fig.add_trace(go.Scatter(x=ANCHOR_FREQS, y=anchor_y, mode="markers", name="Anchors", marker=dict(color="yellow", size=8)))
 
-# === 6. Save ===
-try:
-    pd.DataFrame({"frequency": f, "raw": ideal}).to_csv(output_file, index=False)
-except Exception as e:
-    sys.exit(f"Error saving output file '{output_file}': {e}")
+    fig.update_layout(title="Idealized Target Curve",
+                      xaxis=dict(title="Frequency (Hz)", type="log"),
+                      yaxis_title="Level (dB, normalized)",
+                      hovermode="x unified",
+                      template="plotly_dark")
+    fig.show()
 
-# === 7. Interactive Plot (Plotly) ===
-fig = go.Figure()
-
-# raw
-fig.add_trace(go.Scatter(
-    x=f, y=y_raw, mode="lines", name="Raw derived",
-    line=dict(color="Azure", width=1), opacity=0.4,
-    hovertemplate="%{y:.2f} dB"
-))
-
-# idealized
-fig.add_trace(go.Scatter(
-    x=f, y=ideal, mode="lines", name="Idealized (spline of variable-smooth)",
-    line=dict(color="red", width=2),
-    hovertemplate="%{y:.2f} dB"
-))
-
-# anchor points
-if anchor_freqs:
-    fig.add_trace(go.Scatter(
-        x=anchor_freqs, y=anchor_y_normalized, mode="markers", name="Anchor points",
-        marker=dict(color="yellow", size=8, symbol="circle"),
-        hovertemplate="%{x:.0f} Hz, %{y:.2f} dB"
-    ))
-
-fig.update_layout(
-    title="Idealized Target Curve (Variable Smoothing)",
-    xaxis=dict(title="Frequency (Hz)", type="log"),
-    yaxis_title="Level (dB, normalized)",
-    hovermode="x unified",
-    template="plotly_dark",
-    autosize=True,
-    height=None,
-)
-
-fig.show()
+if __name__ == "__main__":
+    main()
