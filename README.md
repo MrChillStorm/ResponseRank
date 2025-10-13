@@ -114,6 +114,8 @@ python response_rank.py \
   --all-weightings --top 10
 ```
 
+This runs each weighting individually, finds the headphones that rank in the top-N across all weightings, and plots only these tonally balanced top headphones to reduce visual clutter.
+
 #### Filtered Search
 
 ```bash
@@ -149,8 +151,6 @@ python response_rank.py \
 ```
 
 This selects **all AKG headphones** but **excludes the K812**.
-
-This runs each weighting individually, finds the headphones that rank in the top-N across all weightings, and plots only these tonally balanced top headphones to reduce visual clutter.
 
 ---
 
