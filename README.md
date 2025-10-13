@@ -85,6 +85,7 @@ python response_rank.py <measurements_dir> <target_csv> [options]
 | `--top N`                   | Plot the top N ranked headphones                                                                       |
 | `--ranking R1,R2,...`       | Plot specific ranked items by their rank number                                                        |
 | `--sort combined rmse pref` | Sort the printed rankings by **combined score**, **RMSE**, or **preference score** (default: combined) |
+| `--filter STRING`           | Only include headphones whose names match the given string or regex                                    |
 | `--top` and `--ranking`     | Can be used **together**                                                                               |
 
 ---
@@ -113,7 +114,45 @@ python response_rank.py \
   --all-weightings --top 10
 ```
 
+#### Filtered Search
+
+```bash
+python response_rank.py \
+  ~/git/AutoEq/measurements/oratory1990/data/over-ear \
+  "~/git/AutoEq/targets/oratory1990 optimum hifi over-ear.csv" \
+  --all-weightings --top 10 --filter akg
+```
+
+Filters results to only include headphones with `"akg"` in their name.
+
+---
+
+#### Inverted Filter
+
+```bash
+python response_rank.py \
+  ~/git/AutoEq/measurements/oratory1990/data/over-ear \
+  "~/git/AutoEq/targets/oratory1990 optimum hifi over-ear.csv" \
+  --all-weightings --top 10 --filter '^(?!.*akg).*'
+```
+
+Filters out any headphones containing `"akg"` from the results.
+
+#### Combined Positive + Negative Filter
+
+```bash
+python response_rank.py \
+  ~/git/AutoEq/measurements/oratory1990/data/over-ear \
+  ~/git/AutoEq/targets/MCS-Neutral-AKG.csv \
+  --all-weightings --top 13 \
+  --filter '(?=.*akg)(?!.*812)'
+```
+
+This selects **all AKG headphones** but **excludes the K812**.
+
 This runs each weighting individually, finds the headphones that rank in the top-N across all weightings, and plots only these tonally balanced top headphones to reduce visual clutter.
+
+---
 
 * **Derived target curve from top headphones**: When `--all-weightings` is used, the script computes an **empirical neutral curve** by averaging the normalized responses of the tonally balanced top headphones. This curve:
 
@@ -127,14 +166,20 @@ This runs each weighting individually, finds the headphones that rank in the top
    <img src="https://i.imgur.com/RfmCffi.png" alt="Derived target curve plot" width="1244">
   </p>
 
-* **Idealized EQ Targets**
+* **Manufacturer-Specific EQ Targets**
 
-  Two **idealized EQ targets** have been created from the empirically derived curve using the **top 10 real-world headphones** ranked by ResponseRank:
+  The dataset now provides **manufacturer-specific EQ targets**, derived from measurements of the best headphones from each brand. These targets are designed to reflect each manufacturer’s characteristic tonal profile while preserving the natural contour of the top-performing models:
 
-  * **`MCS-NeutralIdeal.csv`** – an idealized version of the **empirical neutral curve**, preserving the natural contour found in the best-measuring headphones and closely following the **oratory1990 optimum hifi over-ear** target.
-  * **`MCS-HarmanIdeal.csv`** – a counterpart based on the same dataset but shaped toward the **Harman over-ear 2018** target, capturing how top-performing headphones interpret Harman in practice.
+  * **Neutral targets** – `MCS-Neutral-AKG.csv`, `MCS-Neutral-Beyerdynamic.csv`, `MCS-Neutral-Sennheiser.csv`, `MCS-Planar-Hifiman.csv`
+    Captures the neutral interpretation of each manufacturer’s top headphones, smoothing measurement anomalies and preserving realistic tonality.
 
-  Both targets were smoothed and idealized through spline fitting for clean, continuous response shapes suitable for EQ and evaluation. While the derived target reflects **what the best headphones measure like**, these two represent **what they should sound like**, and are faithful, real-world listening targets rather than analytical averages.
+  * **Harman-shaped targets** – `MCS-Harman-AKG.csv`, `MCS-Harman-Beyerdynamic.csv`
+    Shapes the responses toward the Harman over-ear 2018 curve, but adjusted according to how each brand’s top models reproduce it in practice.
+
+  **Why manufacturer-specific targets matter:**
+  Brands have characteristic tonal signatures—AKG and Beyerdynamic emphasize midrange clarity, Sennheiser leans toward a smoother low-mid profile, and Hifiman planars can have more extended highs. These targets respect these voicings, enabling EQ or comparisons that are **faithful to each brand’s intended sound** rather than forcing all headphones to a single “average” curve.
+
+  All targets are smoothed and idealized via spline fitting to produce **clean, continuous response curves** suitable for EQ and objective evaluation. They represent **how the best headphones of each manufacturer actually sound**, providing practical references for tuning or ranking.
 
 * **response_idealize.py**
 
