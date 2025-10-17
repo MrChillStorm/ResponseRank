@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
+
 """
 response_idealize_rew_variable.py
 
 Performs REW-style variable smoothing in log-frequency space with per-point
-normalized Gaussian kernels to preserve local energy and produce endpoint bends.
+normalized Gaussian kernels, with gap handling to avoid bridging artifacts.
 """
+
 import os
 import sys
 import argparse
 import numpy as np
 import pandas as pd
-from scipy.interpolate import UnivariateSpline
+from scipy.interpolate import UnivariateSpline, interp1d
 import plotly.graph_objects as go
 import plotly.io as pio
 
@@ -20,6 +22,8 @@ DEFAULT_OUTPUT = "Idealized_Target.csv"
 REFERENCE_HZ = 1000
 ANCHOR_FREQS = []  # optional anchor points
 DEFAULT_POINTS_PER_OCTAVE = 48
+MAX_WINDOW_SAMPLES = 50  # Cap on kernel window size to prevent over-smoothing
+GAP_THRESHOLD_FACTOR = 5.0  # Factor for detecting large gaps
 
 # === Octave fraction N per frequency ===
 def octave_fraction_N(freq):
@@ -35,36 +39,64 @@ def octave_fraction_N(freq):
             N[i] = 3.0
     return N
 
-# === Core: variable log-space smoothing with per-point sigma and endpoint truncation ===
+# === Resample to uniform log-frequency grid ===
+def resample_log_frequency(f, y, points_per_octave=DEFAULT_POINTS_PER_OCTAVE):
+    logf_min, logf_max = np.log10(np.min(f)), np.log10(np.max(f))
+    num_points = int((logf_max - logf_min) / np.log10(2) * points_per_octave)  # Corrected for octaves (log2)
+    logf_new = np.linspace(logf_min, logf_max, num_points)
+    f_new = 10 ** logf_new
+    interp_func = interp1d(np.log10(f), y, kind="linear", fill_value="extrapolate")
+    y_new = interp_func(logf_new)
+    return f_new, y_new
+
+# === Detect frequency gaps ===
+def detect_gaps(f, threshold_factor=GAP_THRESHOLD_FACTOR):
+    logf = np.log10(f)
+    log_diff = np.diff(logf)
+    mean_diff = np.mean(log_diff)
+    gaps = log_diff > threshold_factor * mean_diff
+    gap_indices = np.where(gaps)[0]
+    return gap_indices
+
+# === Core: variable log-space smoothing with gap handling ===
 def rew_variable_smoothing_logspace_preserve_energy(f, mag_db, strength=1.0, half_width_multiplier=4.0):
     f = np.asarray(f)
     mag = np.asarray(mag_db)
 
-    # convert to log-frequency
+    # Convert to log-frequency
     logf = np.log10(f)
     log_step = np.mean(np.diff(logf))
 
-    # compute octave fraction N and sigma per point
+    # Detect gaps
+    gap_indices = detect_gaps(f)
+    weights = np.ones_like(mag)
+    for idx in gap_indices:
+        weights[max(0, idx-1):min(len(mag), idx+2)] = 0.1  # Down-weight near gaps
+
+    # Compute octave fraction N and sigma per point
     N = octave_fraction_N(f)
     bandwidths = f * (2 ** (1.0 / (2.0 * N)) - 2 ** (-1.0 / (2.0 * N)))
     sigma_log = np.log10(1.0 + bandwidths / f) * strength
-    sigma_samples = sigma_log / log_step
-    sigma_samples = np.maximum(sigma_samples, 0.01)
+    sigma_samples = np.maximum(sigma_log / log_step, 0.01)
 
-    # smooth with endpoint truncation
+    # Smooth with endpoint truncation and gap handling
     y_smooth = np.empty_like(mag)
     n = len(f)
     idx = np.arange(n)
     for i in range(n):
         s = sigma_samples[i]
-        hw = int(np.ceil(half_width_multiplier * s))
+        hw = min(int(np.ceil(half_width_multiplier * s)), MAX_WINDOW_SAMPLES)
         left = max(0, i - hw)
         right = min(n - 1, i + hw)
         window_idx = idx[left:right + 1]
         distances = window_idx - i
-        kernel = np.exp(-0.5 * (distances / s) ** 2)
-        kernel /= kernel.sum()
-        y_smooth[i] = np.dot(kernel, mag[window_idx])
+        kernel = np.exp(-0.5 * (distances / s) ** 2) * weights[window_idx]
+        kernel_sum = kernel.sum()
+        if kernel_sum > 0:
+            kernel /= kernel_sum
+            y_smooth[i] = np.dot(kernel, mag[window_idx])
+        else:
+            y_smooth[i] = mag[i]  # Fallback to raw value if kernel is invalid
 
     return y_smooth
 
@@ -74,8 +106,8 @@ def main():
     parser.add_argument("-i", "--input", type=str, default=DEFAULT_INPUT)
     parser.add_argument("-o", "--output", type=str, default=DEFAULT_OUTPUT)
     parser.add_argument("--smoothing-strength", type=float, default=0.5)
-    parser.add_argument("--smoothing-factor", type=float, default=0.001)
-    parser.add_argument("--half-width-mult", type=float, default=4.0)
+    parser.add_argument("--smoothing-factor", type=float, default=0.001)  # Slightly increased for better generalization
+    parser.add_argument("--half-width-mult", type=float, default=4.0)   # Reduced for more local smoothing
     args = parser.parse_args()
 
     if not os.path.isfile(args.input):
@@ -92,23 +124,36 @@ def main():
     f = df["frequency"].to_numpy()
     y_raw = df["raw"].to_numpy()
 
-    # apply variable log-space smoothing
+    # Validate frequency data
+    if np.any(np.diff(f) <= 0):
+        sys.exit("Error: Frequency values must be strictly increasing.")
+
+    logf = np.log10(f)
+    log_diff = np.diff(logf)
+    mean_diff = np.mean(log_diff)
+
+    has_large_gaps = np.any(log_diff > GAP_THRESHOLD_FACTOR * mean_diff)
+    if has_large_gaps:
+        print("Warning: Large frequency gaps detected, resampling to uniform grid.")
+        f, y_raw = resample_log_frequency(f, y_raw)
+
+    # Apply variable log-space smoothing
     y_smooth = rew_variable_smoothing_logspace_preserve_energy(
         f, y_raw,
         strength=args.smoothing_strength,
         half_width_multiplier=args.half_width_mult
     )
 
-    # --- octave-energy preservation and 1kHz anchor ---
+    # Octave-energy preservation and 1kHz anchor
     power = 10 ** (y_smooth / 10.0)
     octave_widths = np.gradient(np.log2(f))
     power *= octave_widths / np.mean(octave_widths)
     y_smooth = 10 * np.log10(power)
 
-    ref_idx = np.argmin(np.abs(f - 1000))
+    ref_idx = np.argmin(np.abs(f - REFERENCE_HZ))
     y_smooth -= y_smooth[ref_idx] - y_raw[ref_idx]
 
-    # spline fit
+    # Spline fit
     logf = np.log10(f)
     weights = np.ones_like(y_smooth)
     if len(ANCHOR_FREQS) > 0:
@@ -118,21 +163,28 @@ def main():
     spline = UnivariateSpline(logf, y_smooth, w=weights, s=len(f) * args.smoothing_factor)
     ideal = spline(logf)
 
-    # normalize to reference
+    # Normalize to reference
     ref = np.interp(REFERENCE_HZ, f, ideal)
     ideal -= ref
 
-    # save
+    # Save
     pd.DataFrame({"frequency": f, "raw": ideal}).to_csv(args.output, index=False)
 
-    # plot
+    # For plot, normalize all curves to 0 at REFERENCE_HZ
+    raw_ref = np.interp(REFERENCE_HZ, f, y_raw)
+    smooth_ref = np.interp(REFERENCE_HZ, f, y_smooth)
+    y_raw_plot = y_raw - raw_ref
+    y_smooth_plot = y_smooth - smooth_ref
+    y_ideal_plot = ideal  # Already normalized
+
+    # Plot
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=f, y=y_raw, mode="lines", name="Raw", line=dict(color="Azure", width=1), opacity=0.4))
-    fig.add_trace(go.Scatter(x=f, y=y_smooth, mode="lines", name="Variable-smoothed", line=dict(color="#FFBF00", width=2, dash="dot")))
-    fig.add_trace(go.Scatter(x=f, y=ideal, mode="lines", name="Idealized (spline)", line=dict(color="red", width=2)))
+    fig.add_trace(go.Scatter(x=f, y=y_raw_plot, mode="lines", name="Raw", line=dict(color="deepskyblue", width=2), opacity=0.4))
+    fig.add_trace(go.Scatter(x=f, y=y_smooth_plot, mode="lines", name="Variable-smoothed", line=dict(color="lime", width=2, dash="dot")))
+    fig.add_trace(go.Scatter(x=f, y=y_ideal_plot, mode="lines", name="Idealized (spline)", line=dict(color="dodgerblue", width=2)))
 
     if len(ANCHOR_FREQS) > 0:
-        anchor_y = np.interp(ANCHOR_FREQS, f, y_smooth) - ref
+        anchor_y = np.interp(ANCHOR_FREQS, f, y_smooth) - smooth_ref
         fig.add_trace(go.Scatter(x=ANCHOR_FREQS, y=anchor_y, mode="markers", name="Anchors", marker=dict(color="yellow", size=8)))
 
     fig.update_layout(title="Idealized Target Curve",
