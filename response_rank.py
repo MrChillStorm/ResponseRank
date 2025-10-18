@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # ResponseRank — RMSE + Pref with Spearman correlation optimization and Plotly plotting
-# Added: --all-weightings option with automatic plotting of tonally balanced top headphones
 
 import os
+import sys
 import argparse
 import pandas as pd
 import numpy as np
@@ -11,6 +11,99 @@ import re
 from sklearn.linear_model import LinearRegression
 from scipy.stats import spearmanr
 from scipy.ndimage import gaussian_filter1d
+from scipy.interpolate import UnivariateSpline, interp1d
+
+def error_exit(msg):
+    """Print error message and exit cleanly without traceback."""
+    print(f"Error: {msg}")
+    sys.exit(1)
+
+# === CONFIG ===
+REFERENCE_HZ = 1000
+ANCHOR_FREQS = []  # Optional anchor points
+DEFAULT_POINTS_PER_OCTAVE = 48
+MAX_WINDOW_SAMPLES = 50  # Cap on kernel window size to prevent over-smoothing
+GAP_THRESHOLD_FACTOR = 5.0  # Factor for detecting large gaps
+SMOOTHING_STRENGTH = 0.5
+HALF_WIDTH_MULTIPLIER = 4.0
+SMOOTHING_FACTOR = 0.001
+
+# === Octave fraction N per frequency ===
+def octave_fraction_N(freq):
+    N = np.empty_like(freq, dtype=float)
+    for i, f in enumerate(freq):
+        if f <= 100:
+            N[i] = 48.0
+        elif f < 1000:
+            N[i] = 48.0 + (6.0 - 48.0) * np.log10(f / 100.0) / np.log10(1000.0 / 100.0)
+        elif f < 10000:
+            N[i] = 6.0 + (3.0 - 6.0) * np.log10(f / 1000.0) / np.log10(10000.0 / 1000.0)
+        else:
+            N[i] = 3.0
+    return N
+
+# === Resample to uniform log-frequency grid ===
+def resample_log_frequency(f, y, points_per_octave=DEFAULT_POINTS_PER_OCTAVE):
+    logf_min, logf_max = np.log10(np.min(f)), np.log10(np.max(f))
+    if logf_min == logf_max:
+        return f, y  # No resampling needed if single point or same freq
+    num_points = max(int((logf_max - logf_min) / np.log10(2) * points_per_octave), 2)  # At least 2 points
+    logf_new = np.linspace(logf_min, logf_max, num_points)
+    f_new = 10 ** logf_new
+    interp_func = interp1d(np.log10(f), y, kind="linear", fill_value="extrapolate")
+    y_new = interp_func(logf_new)
+    return f_new, y_new
+
+# === Detect frequency gaps ===
+def detect_gaps(f, threshold_factor=GAP_THRESHOLD_FACTOR):
+    logf = np.log10(f)
+    log_diff = np.diff(logf)
+    mean_diff = np.mean(log_diff)
+    gaps = log_diff > threshold_factor * mean_diff
+    gap_indices = np.where(gaps)[0]
+    return gap_indices
+
+# === Variable log-space smoothing with gap handling ===
+def rew_variable_smoothing_logspace_preserve_energy(f, mag_db, strength=SMOOTHING_STRENGTH, half_width_multiplier=HALF_WIDTH_MULTIPLIER):
+    f = np.asarray(f)
+    mag = np.asarray(mag_db)
+
+    # Convert to log-frequency
+    logf = np.log10(f)
+    log_step = np.mean(np.diff(logf))
+
+    # Detect gaps
+    gap_indices = detect_gaps(f)
+    weights = np.ones_like(mag)
+    for idx in gap_indices:
+        weights[max(0, idx-1):min(len(mag), idx+2)] = 0.1  # Down-weight near gaps
+
+    # Compute octave fraction N and sigma per point
+    N = octave_fraction_N(f)
+    bandwidths = f * (2 ** (1.0 / (2.0 * N)) - 2 ** (-1.0 / (2.0 * N)))
+    sigma_log = np.log10(1.0 + bandwidths / f) * strength
+    sigma_samples = np.maximum(sigma_log / log_step, 0.01)
+
+    # Smooth with endpoint truncation and gap handling
+    y_smooth = np.empty_like(mag)
+    n = len(f)
+    idx = np.arange(n)
+    for i in range(n):
+        s = sigma_samples[i]
+        hw = min(int(np.ceil(half_width_multiplier * s)), MAX_WINDOW_SAMPLES)
+        left = max(0, i - hw)
+        right = min(n - 1, i + hw)
+        window_idx = idx[left:right + 1]
+        distances = window_idx - i
+        kernel = np.exp(-0.5 * (distances / s) ** 2) * weights[window_idx]
+        kernel_sum = kernel.sum()
+        if kernel_sum > 0:
+            kernel /= kernel_sum
+            y_smooth[i] = np.dot(kernel, mag[window_idx])
+        else:
+            y_smooth[i] = mag[i]  # Fallback to raw value if kernel is invalid
+
+    return y_smooth
 
 # ----------------------------------------------------------------------
 # Args
@@ -31,8 +124,7 @@ def parse_args():
     parser.add_argument("--sort", type=str, choices=["combined","rmse","pref"], default="combined",
                         help="Sort by this metric for table and plot. Default: combined")
     parser.add_argument("--filter", type=str,
-    help="Regular expression to filter headphone filenames (e.g. 'HD[56]00|DT 880').")
-
+                        help="Regular expression to filter headphone filenames (e.g. 'HD[56]00|DT 880').")
     return parser.parse_args()
 
 # ----------------------------------------------------------------------
@@ -54,7 +146,6 @@ def b_weight(freq):
     f = np.asarray(freq, dtype=float)
     f2 = f**2
     c = 12194.0
-    # Approximate B between A and C (informational)
     num = (c**2)*(f2**1.3)
     den = (f2+20.6**2)*(f2+c**2)*np.sqrt((f2+158.5**2)*(f2+737.9**2))
     Rb = num/den
@@ -77,6 +168,10 @@ def c_weight(freq):
 # Smoothing & normalization
 # ----------------------------------------------------------------------
 def smooth_one_third_octave_rms(freq, resp_db):
+    """
+    Apply 1/3rd octave RMS smoothing for preference metric calculation.
+    Used only in compute_pref_metrics, not for derived target smoothing.
+    """
     freq = np.asarray(freq)
     resp_db = np.asarray(resp_db)
     resp_lin = 10**(resp_db/20.0)
@@ -98,17 +193,6 @@ def smooth_one_third_octave_rms(freq, resp_db):
 def normalize_at_1kHz(freq, resp):
     val_1k = np.interp(1000, freq, resp)
     return resp - val_1k
-
-def gaussian_smooth(freq, resp, sigma=3.0):
-    """
-    Apply Gaussian smoothing to a response curve.
-    freq: frequency array (Hz)
-    resp: response array (dB)
-    sigma: smoothing sigma (in index units)
-    """
-    resp = np.asarray(resp)
-    smoothed = gaussian_filter1d(resp, sigma=sigma)
-    return smoothed
 
 # ----------------------------------------------------------------------
 # Metrics
@@ -139,7 +223,6 @@ def compute_pref_metrics(meas_freq, meas_resp, target_freq, target_resp):
 def find_optimal_weights(rmses, prefs):
     rmses = np.array(rmses)
     prefs = np.array(prefs)
-    # protect against constant arrays
     if rmses.max() == rmses.min():
         rmses_n = np.zeros_like(rmses)
     else:
@@ -166,57 +249,63 @@ def find_optimal_weights(rmses, prefs):
 # Plot helper
 # ----------------------------------------------------------------------
 def plot_headphones(measurements_dir, target_freq, target_resp, ranking, top=None, ranking_nums=None, weight_label="Flat", sort_metric="combined"):
-    to_plot=[]
-    title_parts=[]
+    to_plot = []
+    title_parts = []
     if top:
         to_plot.extend(ranking[:top])
         title_parts.append(f"Top {top}")
     if ranking_nums:
         to_plot.extend([ranking[i-1] for i in ranking_nums if 0<i<=len(ranking)])
         title_parts.append(f"Ranks {','.join(map(str, ranking_nums))}")
-    # Deduplicate preserving order
-    seen=set()
-    unique=[]
+    seen = set()
+    unique = []
     for r in to_plot:
         if r[0] not in seen:
-            unique.append(r); seen.add(r[0])
-    to_plot=unique
-    title_suffix=" & ".join(title_parts) if title_parts else "All Headphones"
+            unique.append(r)
+            seen.add(r[0])
+    to_plot = unique
+    title_suffix = " & ".join(title_parts) if title_parts else "All Headphones"
     if to_plot:
-        fig=go.Figure()
-        target_norm=normalize_at_1kHz(target_freq,target_resp)
-        fig.add_trace(go.Scatter(x=target_freq,y=target_norm,mode='lines',
-                                 name='Target Curve',line=dict(color='black',width=2)))
-        for fname,rmse,pref,comb in to_plot:
+        fig = go.Figure()
+        target_norm = normalize_at_1kHz(target_freq, target_resp)
+        fig.add_trace(go.Scatter(x=target_freq, y=target_norm, mode='lines',
+                                 name='Target Curve', line=dict(color='black', width=2)))
+        for fname, rmse, pref, comb in to_plot:
             meas_path = os.path.join(measurements_dir, fname)
-            # If the incoming 'fname' is already a cleaned name (no .csv) skip reading by filename
             if os.path.exists(meas_path):
-                meas = pd.read_csv(meas_path)
-                meas_freq,meas_resp = meas.iloc[:,0].values,meas.iloc[:,1].values
-                meas_norm = normalize_at_1kHz(meas_freq,meas_resp)
-            else:
-                # If the caller passed a tuple where meas data isn't available, we skip reading and plot nothing
-                # (defensive fallback)
-                continue
-
-            clean_name = os.path.splitext(fname)[0]
-            if sort_metric == "AvgNormalizedRank":
-                label = f"{clean_name} (AvgNorm={comb:.3f})"
-            else:
-                label = f"{clean_name} (RMSE={rmse:.2f}, Pref={pref:.2f}, Comb={comb:.2f})"
-            fig.add_trace(go.Scatter(
-                x=meas_freq,y=meas_norm,mode='lines',
-                name=label
-            ))
+                try:
+                    meas = pd.read_csv(meas_path, sep=',', encoding='utf-8')
+                    if meas.shape[1] < 2:
+                        raise ValueError("Measurement CSV must have at least two columns.")
+                    first_row = meas.columns[:2].to_list()
+                    is_numeric = not np.isnan(pd.to_numeric(first_row, errors='coerce')).all()
+                    if is_numeric:
+                        print(f"Warning: No headers detected in {fname} (first row is numeric). Using default headers 'frequency,raw'.")
+                        meas = pd.read_csv(meas_path, header=None, names=["frequency", "raw"], sep=',', encoding='utf-8')
+                    meas_freq = pd.to_numeric(meas.iloc[:, 0], errors='raise').to_numpy()
+                    meas_resp = pd.to_numeric(meas.iloc[:, 1], errors='raise').to_numpy()
+                    meas_norm = normalize_at_1kHz(meas_freq, meas_resp)
+                except Exception as e:
+                    print(f"Skipping {fname} in plot: {e}")
+                    continue
+                clean_name = os.path.splitext(fname)[0]
+                if sort_metric == "AvgNormalizedRank":
+                    label = f"{clean_name} (AvgNorm={comb:.3f})"
+                else:
+                    label = f"{clean_name} (RMSE={rmse:.2f}, Pref={pref:.2f}, Comb={comb:.2f})"
+                fig.add_trace(go.Scatter(
+                    x=meas_freq, y=meas_norm, mode='lines',
+                    name=label
+                ))
         fig.update_layout(
             title=f"{title_suffix} vs Target ({weight_label})",
-            xaxis_type='log',xaxis_title='Frequency (Hz)',yaxis_title='Response (dB)',
-            template='plotly_white',hovermode='x unified',
-            margin=dict(t=100,b=80),
+            xaxis_type='log', xaxis_title='Frequency (Hz)', yaxis_title='Response (dB)',
+            template='plotly_white', hovermode='x unified',
+            margin=dict(t=100, b=80),
             annotations=[
-                dict(x=0,y=0,xref='paper',yref='paper',
+                dict(x=0, y=0, xref='paper', yref='paper',
                      text=f'Sort metric: {sort_metric}; Pref uses 1/3-octave smoothed data; curves are raw',
-                     showarrow=False,font=dict(size=10),xanchor='left',yanchor='bottom')
+                     showarrow=False, font=dict(size=10), xanchor='left', yanchor='bottom')
             ]
         )
         fig.show()
@@ -239,12 +328,38 @@ def rank_headphones(measurements_dir, target_freq, target_resp, weight_func, wei
             continue
         if pattern and not pattern.search(fname):
             continue
+        meas_path = os.path.join(measurements_dir, fname)
         try:
-            meas = pd.read_csv(os.path.join(measurements_dir, fname))
-            meas_freq, meas_resp = meas.iloc[:, 0].values, meas.iloc[:, 1].values
+            meas = pd.read_csv(meas_path, sep=',', encoding='utf-8')
+            if meas.shape[1] < 2:
+                raise ValueError("Measurement CSV must have at least two columns.")
+            first_row = meas.columns[:2].to_list()
+            is_numeric = not np.isnan(pd.to_numeric(first_row, errors='coerce')).all()
+            if is_numeric:
+                print(f"Warning: No headers detected in {fname} (first row is numeric). Using default headers 'frequency,raw'.")
+                meas = pd.read_csv(meas_path, header=None, names=["frequency", "raw"], sep=',', encoding='utf-8')
+            col1 = meas.iloc[:, 0].astype(str)
+            col2 = meas.iloc[:, 1].astype(str)
+            non_numeric_col1 = col1[~pd.to_numeric(col1, errors='coerce').notna()]
+            non_numeric_col2 = col2[~pd.to_numeric(col2, errors='coerce').notna()]
+            if not non_numeric_col1.empty or not non_numeric_col2.empty:
+                raise ValueError(f"Non-numeric values found in {fname}: {non_numeric_col1.tolist()[:5]}, {non_numeric_col2.tolist()[:5]}")
+            meas_freq = pd.to_numeric(meas.iloc[:, 0], errors='raise').to_numpy()
+            meas_resp = pd.to_numeric(meas.iloc[:, 1], errors='raise').to_numpy()
+            if len(meas_freq) < 2:
+                raise ValueError("Measurement CSV must have at least 2 data points.")
+            if not np.all(np.isfinite(meas_freq)) or not np.all(np.isfinite(meas_resp)):
+                raise ValueError("Measurement frequency and dB values must be finite numbers.")
+            if np.any(meas_freq <= 0):
+                raise ValueError("Measurement frequency values must be positive.")
+            if np.any(np.diff(meas_freq) <= 0):
+                raise ValueError("Measurement frequency values must be strictly increasing.")
             rmse = compute_rmse(meas_freq, meas_resp, target_freq, target_resp, weights)
             pref = compute_pref_metrics(meas_freq, meas_resp, target_freq, target_resp)
             results.append((fname, rmse, pref))
+        except ValueError as e:
+            if verbose:
+                print(f"Skipping {fname}: Invalid data - {e}")
         except Exception as e:
             if verbose:
                 print(f"Skipping {fname}: {e}")
@@ -285,8 +400,48 @@ def rank_headphones(measurements_dir, target_freq, target_resp, weight_func, wei
 # ----------------------------------------------------------------------
 def main():
     args = parse_args()
-    target = pd.read_csv(args.target_path)
-    target_freq, target_resp = target.iloc[:, 0].values, target.iloc[:, 1].values
+    try:
+        target = pd.read_csv(args.target_path, sep=',', encoding='utf-8')
+        first_row = target.columns[:2].to_list()
+        is_numeric = not np.isnan(pd.to_numeric(first_row, errors='coerce')).all()
+        if is_numeric:
+            print("Warning: No headers detected in target CSV (first row is numeric). Using default headers 'frequency,raw'.")
+            target = pd.read_csv(args.target_path, header=None, names=["frequency", "raw"], sep=',', encoding='utf-8')
+    except pd.errors.EmptyDataError:
+        error_exit("Target CSV file is empty or contains no valid data.")
+    except FileNotFoundError:
+        error_exit(f"Target CSV file not found: {args.target_path}")
+    except pd.errors.ParserError:
+        error_exit("Failed to parse target CSV file. Check delimiter (expected comma) and file format.")
+    except Exception as e:
+        error_exit(f"Failed to read target CSV file: {str(e)}")
+
+    if target.shape[1] < 2:
+        error_exit("Target CSV must have at least two columns (frequency and dB).")
+
+    try:
+        col1 = target.iloc[:, 0].astype(str)
+        col2 = target.iloc[:, 1].astype(str)
+        non_numeric_col1 = col1[~pd.to_numeric(col1, errors='coerce').notna()]
+        non_numeric_col2 = col2[~pd.to_numeric(col2, errors='coerce').notna()]
+        if not non_numeric_col1.empty or not non_numeric_col2.empty:
+            error_exit(f"Non-numeric values found in target CSV: {non_numeric_col1.tolist()[:5]}, {non_numeric_col2.tolist()[:5]}")
+        target_freq = pd.to_numeric(target.iloc[:, 0], errors='raise').to_numpy()
+        target_resp = pd.to_numeric(target.iloc[:, 1], errors='raise').to_numpy()
+    except ValueError as e:
+        error_exit(f"Target CSV first two columns must contain numeric values. Error: {str(e)}")
+
+    if len(target_freq) < 2:
+        error_exit("Target CSV must have at least 2 data points.")
+
+    if not np.all(np.isfinite(target_freq)) or not np.all(np.isfinite(target_resp)):
+        error_exit("Target frequency and dB values must be finite numbers.")
+
+    if np.any(target_freq <= 0):
+        error_exit("Target frequency values must be positive.")
+
+    if np.any(np.diff(target_freq) <= 0):
+        error_exit("Target frequency values must be strictly increasing.")
 
     if args.all_weightings:
         weightings = [
@@ -351,83 +506,140 @@ def main():
         derived_responses = []
         for fname, rmse, pref, avg in filtered_sorted[:top_to_show]:
             meas_path = os.path.join(args.measurements_dir, fname)
-            meas = pd.read_csv(meas_path)
-            freq, resp = meas.iloc[:, 0].values, meas.iloc[:, 1].values
-            interp_resp = np.interp(target_freq, freq, resp)
-            norm_resp = normalize_at_1kHz(target_freq, interp_resp)
-            derived_responses.append(norm_resp)
+            try:
+                meas = pd.read_csv(meas_path, sep=',', encoding='utf-8')
+                if meas.shape[1] < 2:
+                    raise ValueError("Measurement CSV must have at least two columns.")
+                first_row = meas.columns[:2].to_list()
+                is_numeric = not np.isnan(pd.to_numeric(first_row, errors='coerce')).all()
+                if is_numeric:
+                    print(f"Warning: No headers detected in {fname} (first row is numeric). Using default headers 'frequency,raw'.")
+                    meas = pd.read_csv(meas_path, header=None, names=["frequency", "raw"], sep=',', encoding='utf-8')
+                col1 = meas.iloc[:, 0].astype(str)
+                col2 = meas.iloc[:, 1].astype(str)
+                non_numeric_col1 = col1[~pd.to_numeric(col1, errors='coerce').notna()]
+                non_numeric_col2 = col2[~pd.to_numeric(col2, errors='coerce').notna()]
+                if not non_numeric_col1.empty or not non_numeric_col2.empty:
+                    raise ValueError(f"Non-numeric values found in {fname}: {non_numeric_col1.tolist()[:5]}, {non_numeric_col2.tolist()[:5]}")
+                freq = pd.to_numeric(meas.iloc[:, 0], errors='raise').to_numpy()
+                resp = pd.to_numeric(meas.iloc[:, 1], errors='raise').to_numpy()
+                if len(freq) < 2:
+                    raise ValueError("Measurement CSV must have at least 2 data points.")
+                if not np.all(np.isfinite(freq)) or not np.all(np.isfinite(resp)):
+                    raise ValueError("Measurement frequency and dB values must be finite numbers.")
+                if np.any(freq <= 0):
+                    raise ValueError("Measurement frequency values must be positive.")
+                if np.any(np.diff(freq) <= 0):
+                    raise ValueError("Measurement frequency values must be strictly increasing.")
+                interp_resp = np.interp(target_freq, freq, resp)
+                norm_resp = normalize_at_1kHz(target_freq, interp_resp)
+                derived_responses.append(norm_resp)
+            except Exception as e:
+                print(f"Skipping {fname} in derived target computation: {e}")
+                continue
 
-        if derived_responses:
-            derived_target = np.mean(derived_responses, axis=0)
+        if not derived_responses:
+            print("No valid measurement data available for derived target computation.")
+            return
 
-            # -----------------------------
-            # Find optimal sigma for 2.5–4.5 kHz hump
-            # -----------------------------
-            mask_hump = (2500, 4500)
-            # Find the peak amplitude in the original Oratory target in that region
-            idx_mask = (target_freq >= mask_hump[0]) & (target_freq <= mask_hump[1])
-            target_peak = np.max(derived_target[idx_mask])
+        derived_target = np.mean(derived_responses, axis=0)
+        f = target_freq
+        y_raw = derived_target
 
-            # Scan candidate sigmas
-            sigma_candidates = np.linspace(1, 20, 100)
-            best_sigma = sigma_candidates[0]
-            min_error = float('inf')
-            for sigma in sigma_candidates:
-                smoothed = gaussian_filter1d(derived_target, sigma=sigma)
-                peak_amp = np.max(smoothed[idx_mask])
-                error = abs(peak_amp - target_peak)
-                if error < min_error:
-                    min_error = error
-                    best_sigma = sigma
+        # Apply variable log-space smoothing
+        logf = np.log10(f)
+        log_diff = np.diff(logf)
+        mean_diff = np.mean(log_diff)
+        has_large_gaps = np.any(log_diff > GAP_THRESHOLD_FACTOR * mean_diff)
+        if has_large_gaps:
+            print("Warning: Large frequency gaps detected in derived target, resampling to uniform grid.")
+            f, y_raw = resample_log_frequency(f, y_raw)
 
-            #print(f"Optimal sigma for hump amplitude match: {best_sigma:.3f}")
+        y_smooth = rew_variable_smoothing_logspace_preserve_energy(
+            f, y_raw, strength=SMOOTHING_STRENGTH, half_width_multiplier=HALF_WIDTH_MULTIPLIER
+        )
 
-            # Apply Gaussian smoothing with optimal sigma
-            derived_target_smooth = gaussian_smooth(target_freq, derived_target, sigma=best_sigma)
+        # Octave-energy preservation and 1kHz anchor
+        power = 10 ** (y_smooth / 10.0)
+        octave_widths = np.gradient(np.log2(f))
+        if np.any(octave_widths <= 0):
+            error_exit("Invalid octave widths detected after resampling.")
+        power *= octave_widths / np.mean(octave_widths)
+        y_smooth = 10 * np.log10(power)
+        ref_idx = np.argmin(np.abs(f - REFERENCE_HZ))
+        y_smooth -= y_smooth[ref_idx] - y_raw[ref_idx]
 
-            # -----------------------------
-            # Plot all together
-            # -----------------------------
-            fig = go.Figure()
-            target_norm = normalize_at_1kHz(target_freq, target_resp)
-            fig.add_trace(go.Scatter(
-                x=target_freq, y=target_norm, mode='lines',
-                name='Original Target', line=dict(color='Red', width=2)
-            ))
-            fig.add_trace(go.Scatter(
-                x=target_freq, y=derived_target_smooth, mode='lines',
-                name=f'Derived Target (empirical neutral, σ={best_sigma:.2f})',
-                line=dict(color='orange', width=3, dash='dot')
-            ))
+        # Spline fit
+        logf = np.log10(f)
+        weights = np.ones_like(y_smooth)
+        if len(ANCHOR_FREQS) > 0:
+            anchor_indices = [np.argmin(np.abs(f - af)) for af in ANCHOR_FREQS if min(f) <= af <= max(f)]
+            if anchor_indices:
+                weights[anchor_indices] = 5.0
+        if len(f) < 4:
+            print("Warning: Too few points for spline fit, using linear interpolation.")
+            interp_func = interp1d(logf, y_smooth, kind="linear", fill_value="extrapolate")
+            ideal = interp_func(logf)
+        else:
+            spline = UnivariateSpline(logf, y_smooth, w=weights, s=len(f) * SMOOTHING_FACTOR)
+            ideal = spline(logf)
 
-            for fname, rmse, pref, avg in filtered_sorted[:top_to_show]:
-                meas = pd.read_csv(os.path.join(args.measurements_dir, fname))
-                freq, resp = meas.iloc[:, 0].values, meas.iloc[:, 1].values
+        # Normalize to reference
+        ref = np.interp(REFERENCE_HZ, f, ideal)
+        derived_target_smooth = ideal - ref
+
+        # Plot all together
+        fig = go.Figure()
+        target_norm = normalize_at_1kHz(target_freq, target_resp)
+        fig.add_trace(go.Scatter(
+            x=target_freq, y=target_norm, mode='lines',
+            name='Original Target', line=dict(color='deepskyblue', width=2)
+        ))
+        fig.add_trace(go.Scatter(
+            x=f, y=derived_target_smooth, mode='lines',
+            name=f'Derived Target (empirical neutral, strength={SMOOTHING_STRENGTH:.2f}, s={SMOOTHING_FACTOR:.3f})',
+            line=dict(color='lime', width=3, dash='dot')
+        ))
+
+        for fname, rmse, pref, avg in filtered_sorted[:top_to_show]:
+            meas_path = os.path.join(args.measurements_dir, fname)
+            try:
+                meas = pd.read_csv(meas_path, sep=',', encoding='utf-8')
+                if meas.shape[1] < 2:
+                    raise ValueError("Measurement CSV must have at least two columns.")
+                first_row = meas.columns[:2].to_list()
+                is_numeric = not np.isnan(pd.to_numeric(first_row, errors='coerce')).all()
+                if is_numeric:
+                    print(f"Warning: No headers detected in {fname} (first row is numeric). Using default headers 'frequency,raw'.")
+                    meas = pd.read_csv(meas_path, header=None, names=["frequency", "raw"], sep=',', encoding='utf-8')
+                freq = pd.to_numeric(meas.iloc[:, 0], errors='raise').to_numpy()
+                resp = pd.to_numeric(meas.iloc[:, 1], errors='raise').to_numpy()
                 meas_norm = normalize_at_1kHz(freq, resp)
                 clean_name = os.path.splitext(fname)[0]
                 fig.add_trace(go.Scatter(
                     x=freq, y=meas_norm, mode='lines',
                     name=f"{clean_name} (AvgNorm={avg:.3f})"
                 ))
+            except Exception as e:
+                print(f"Skipping {fname} in plot: {e}")
+                continue
 
-            fig.update_layout(
-                title=f"Tonally Balanced Top-{top_to_show} vs Targets",
-                xaxis_type='log', xaxis_title='Frequency (Hz)',
-                yaxis_title='Response (dB)',
-                template='plotly_dark', hovermode='x unified',
-                margin=dict(t=100, b=80)
-            )
-            fig.show()
+        fig.update_layout(
+            title=f"Tonally Balanced Top-{top_to_show} vs Targets",
+            xaxis_type='log', xaxis_title='Frequency (Hz)',
+            yaxis_title='Response (dB)',
+            template='plotly_dark', hovermode='x unified',
+            margin=dict(t=100, b=80)
+        )
+        fig.show()
 
-            # -----------------------------
-            # Export to CSV
-            # -----------------------------
-            pd.DataFrame({'frequency': target_freq, 'raw': derived_target_smooth}).to_csv(
-                "Derived_Target.csv", index=False
-            )
+        # Export to CSV
+        print("Writing output CSV with headers: ['frequency', 'raw']")
+        pd.DataFrame({'frequency': f, 'raw': derived_target_smooth}).to_csv(
+            "Derived_Target.csv", index=False, header=True
+        )
 
     else:
-        # Single weighting
         if args.aweight:
             weight_func, weight_label = a_weight, "A-weighted"
         elif args.bweight:
