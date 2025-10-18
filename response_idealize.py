@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 
 """
-response_idealize_rew_variable.py
+response_idealize.py
 
-Performs REW-style variable smoothing in log-frequency space with per-point
-normalized Gaussian kernels, with gap handling to avoid bridging artifacts.
+Performs REW-style variable smoothing in log-frequency space using per-point
+normalized Gaussian kernels, with gap handling to prevent bridging artifacts.
+Reads input CSV with provided headers or as headerless if none exist. Outputs
+CSV with the input headers or 'frequency,raw' for headerless files.
 """
 
 import os
@@ -25,6 +27,11 @@ DEFAULT_POINTS_PER_OCTAVE = 48
 MAX_WINDOW_SAMPLES = 50  # Cap on kernel window size to prevent over-smoothing
 GAP_THRESHOLD_FACTOR = 5.0  # Factor for detecting large gaps
 
+def error_exit(msg):
+    """Print error message and exit cleanly without traceback."""
+    print(f"Error: {msg}")
+    sys.exit(1)
+
 # === Octave fraction N per frequency ===
 def octave_fraction_N(freq):
     N = np.empty_like(freq, dtype=float)
@@ -42,7 +49,9 @@ def octave_fraction_N(freq):
 # === Resample to uniform log-frequency grid ===
 def resample_log_frequency(f, y, points_per_octave=DEFAULT_POINTS_PER_OCTAVE):
     logf_min, logf_max = np.log10(np.min(f)), np.log10(np.max(f))
-    num_points = int((logf_max - logf_min) / np.log10(2) * points_per_octave)  # Corrected for octaves (log2)
+    if logf_min == logf_max:
+        return f, y  # No resampling needed if single point or same freq
+    num_points = max(int((logf_max - logf_min) / np.log10(2) * points_per_octave), 2)  # At least 2 points
     logf_new = np.linspace(logf_min, logf_max, num_points)
     f_new = 10 ** logf_new
     interp_func = interp1d(np.log10(f), y, kind="linear", fill_value="extrapolate")
@@ -106,27 +115,67 @@ def main():
     parser.add_argument("-i", "--input", type=str, default=DEFAULT_INPUT)
     parser.add_argument("-o", "--output", type=str, default=DEFAULT_OUTPUT)
     parser.add_argument("--smoothing-strength", type=float, default=0.5)
-    parser.add_argument("--smoothing-factor", type=float, default=0.001)  # Slightly increased for better generalization
-    parser.add_argument("--half-width-mult", type=float, default=4.0)   # Reduced for more local smoothing
+    parser.add_argument("--smoothing-factor", type=float, default=0.001)
+    parser.add_argument("--half-width-mult", type=float, default=4.0)
     args = parser.parse_args()
 
     if not os.path.isfile(args.input):
-        sys.exit(f"Error: Input file '{args.input}' not found.")
+        error_exit(f"Input file '{args.input}' not found.")
     outdir = os.path.dirname(args.output) or "."
     if not os.access(outdir, os.W_OK):
-        sys.exit(f"Error: Cannot write to output directory '{outdir}'.")
+        error_exit(f"Cannot write to output directory '{outdir}'.")
 
     pio.renderers.default = "browser"
 
-    df = pd.read_csv(args.input)
-    if "frequency" not in df.columns or "raw" not in df.columns:
-        sys.exit("Error: input CSV must contain 'frequency' and 'raw' columns.")
-    f = df["frequency"].to_numpy()
-    y_raw = df["raw"].to_numpy()
+    try:
+        # Read CSV with explicit comma delimiter and UTF-8 encoding
+        df = pd.read_csv(args.input, header="infer", sep=',', encoding='utf-8')
+        # Check if the first row (headers) is non-numeric
+        first_row = df.columns[:2].to_list()
+        is_numeric = not np.isnan(pd.to_numeric(first_row, errors='coerce')).all()
+        if is_numeric:
+            # No headers detected, re-read as headerless with default names
+            print("Warning: No headers detected in input CSV (first row is numeric). Using default headers 'frequency,raw'.")
+            df = pd.read_csv(args.input, header=None, names=["frequency", "raw"], sep=',', encoding='utf-8')
+            headers = ["frequency", "raw"]
+        else:
+            # Headers present, use them
+            headers = first_row
+            print(f"Using input CSV headers: {headers}")
+    except pd.errors.EmptyDataError:
+        error_exit("Input CSV file is empty or contains no valid data.")
+    except pd.errors.ParserError:
+        error_exit("Failed to parse CSV file. Check delimiter (expected comma) and file format.")
+    except Exception as e:
+        error_exit(f"Failed to read input CSV file: {str(e)}")
 
-    # Validate frequency data
+    if df.shape[1] < 2:
+        error_exit("Input CSV must have at least two columns.")
+
+    try:
+        # Debug non-numeric values
+        col1 = df.iloc[:, 0].astype(str)
+        col2 = df.iloc[:, 1].astype(str)
+        non_numeric_col1 = col1[~pd.to_numeric(col1, errors='coerce').notna()]
+        non_numeric_col2 = col2[~pd.to_numeric(col2, errors='coerce').notna()]
+        if not non_numeric_col1.empty or not non_numeric_col2.empty:
+            error_exit(f"Non-numeric values found in columns: {non_numeric_col1.tolist()[:5]}, {non_numeric_col2.tolist()[:5]}")
+        f = pd.to_numeric(df.iloc[:, 0], errors='raise').to_numpy()
+        y_raw = pd.to_numeric(df.iloc[:, 1], errors='raise').to_numpy()
+    except ValueError as e:
+        error_exit(f"First two columns of input CSV must contain numeric values. Error: {str(e)}")
+
+    if len(f) < 2:
+        error_exit("Input CSV must have at least 2 data points.")
+
+    if not np.all(np.isfinite(f)) or not np.all(np.isfinite(y_raw)):
+        error_exit("Frequency and raw values must be finite numbers.")
+
+    if np.any(f <= 0):
+        error_exit("Frequency values must be positive.")
+
     if np.any(np.diff(f) <= 0):
-        sys.exit("Error: Frequency values must be strictly increasing.")
+        error_exit("Frequency values must be strictly increasing.")
 
     logf = np.log10(f)
     log_diff = np.diff(logf)
@@ -147,6 +196,9 @@ def main():
     # Octave-energy preservation and 1kHz anchor
     power = 10 ** (y_smooth / 10.0)
     octave_widths = np.gradient(np.log2(f))
+    if np.any(octave_widths <= 0):
+        error_exit("Invalid octave widths detected after resampling.")
+
     power *= octave_widths / np.mean(octave_widths)
     y_smooth = 10 * np.log10(power)
 
@@ -157,18 +209,25 @@ def main():
     logf = np.log10(f)
     weights = np.ones_like(y_smooth)
     if len(ANCHOR_FREQS) > 0:
-        anchor_indices = [np.argmin(np.abs(f - af)) for af in ANCHOR_FREQS]
-        weights[anchor_indices] = 5.0
+        anchor_indices = [np.argmin(np.abs(f - af)) for af in ANCHOR_FREQS if min(f) <= af <= max(f)]
+        if anchor_indices:
+            weights[anchor_indices] = 5.0
 
-    spline = UnivariateSpline(logf, y_smooth, w=weights, s=len(f) * args.smoothing_factor)
-    ideal = spline(logf)
+    if len(f) < 4:
+        print("Warning: Too few points for spline fit, using linear interpolation.")
+        interp_func = interp1d(logf, y_smooth, kind="linear", fill_value="extrapolate")
+        ideal = interp_func(logf)
+    else:
+        spline = UnivariateSpline(logf, y_smooth, w=weights, s=len(f) * args.smoothing_factor)
+        ideal = spline(logf)
 
     # Normalize to reference
     ref = np.interp(REFERENCE_HZ, f, ideal)
     ideal -= ref
 
-    # Save
-    pd.DataFrame({"frequency": f, "raw": ideal}).to_csv(args.output, index=False)
+    # Save with input headers (or defaults), explicitly ensuring headers are written
+    print(f"Writing output CSV with headers: {headers}")
+    pd.DataFrame({headers[0]: f, headers[1]: ideal}).to_csv(args.output, index=False, header=True)
 
     # For plot, normalize all curves to 0 at REFERENCE_HZ
     raw_ref = np.interp(REFERENCE_HZ, f, y_raw)
